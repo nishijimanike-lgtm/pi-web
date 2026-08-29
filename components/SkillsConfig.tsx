@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type {
   SkillInfo as Skill,
@@ -574,7 +574,10 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
-
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
+  const [scopeFilter, setScopeFilter] = useState<"all" | "project" | "global" | "path">("all");
+  const [batchUpdating, setBatchUpdating] = useState(false);
   const loadSkills = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -732,12 +735,72 @@ export function SkillsConfig({
       });
     }
   }, []);
+  const filteredSkills = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return skills.filter((skill) => {
+      if (statusFilter === "enabled" && skill.disableModelInvocation) return false;
+      if (statusFilter === "disabled" && !skill.disableModelInvocation) return false;
+
+      const scope = sourceLabel(skill);
+      if (scopeFilter !== "all" && scope !== scopeFilter) return false;
+
+      if (!q) return true;
+      return (
+        skill.name.toLowerCase().includes(q) ||
+        (skill.description && skill.description.toLowerCase().includes(q)) ||
+        skill.filePath.toLowerCase().includes(q) ||
+        (skill.install?.package && skill.install.package.toLowerCase().includes(q))
+      );
+    });
+  }, [skills, searchQuery, statusFilter, scopeFilter]);
+
+  const totalSkillsCount = skills.length;
+  const enabledSkillsCount = skills.filter((s) => !s.disableModelInvocation).length;
+  const hasActiveFilters = searchQuery.trim().length > 0 || statusFilter !== "all" || scopeFilter !== "all";
+
+  const clearFilters = () => {
+    setSearchQuery("");
+    setStatusFilter("all");
+    setScopeFilter("all");
+  };
+
+  const batchToggle = useCallback(async (targetSkills: Skill[], disable: boolean) => {
+    const needUpdate = targetSkills.filter((s) => Boolean(s.disableModelInvocation) !== disable);
+    if (needUpdate.length === 0) return;
+
+    setBatchUpdating(true);
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/skills", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: needUpdate.map((s) => ({
+            filePath: s.filePath,
+            disableModelInvocation: disable,
+          })),
+        }),
+      });
+      const d = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || d.error) {
+        setSaveError(d.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      const updatedPaths = new Set(needUpdate.map((s) => s.filePath));
+      setSkills((prev) =>
+        prev.map((s) => (updatedPaths.has(s.filePath) ? { ...s, disableModelInvocation: disable } : s)),
+      );
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setBatchUpdating(false);
+    }
+  }, []);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.skills")} subtitle={shortenPath(cwd)} closeLabel={t("i18n.close")} onClose={onClose}>
-
         {!projectResourcesLoaded && (
           <div role="status" className="config-trust-notice">
             {t("trust.skillsNotLoaded")}
@@ -748,6 +811,207 @@ export function SkillsConfig({
         <ConfigSplitView>
           {/* Left: skill list */}
           <ConfigSidebar>
+            {/* Top Toolbar: Search, Filters, and Batch Controls */}
+            <div
+              style={{
+                padding: "8px 8px 6px",
+                borderBottom: "1px solid var(--border)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                background: "var(--bg-panel)",
+                flexShrink: 0,
+              }}
+            >
+              {/* Header Status & Count */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
+                  {t("common.skills")}
+                </span>
+                <span
+                  style={{
+                    fontSize: 10.5,
+                    padding: "1px 6px",
+                    borderRadius: 8,
+                    background: enabledSkillsCount < totalSkillsCount ? "var(--bg-selected, rgba(59, 130, 246, 0.12))" : "var(--bg)",
+                    border: "1px solid var(--border)",
+                    color: enabledSkillsCount < totalSkillsCount ? "var(--accent)" : "var(--text-dim)",
+                    fontWeight: 600,
+                  }}
+                >
+                  {t("skills.enabledCount", { enabled: enabledSkillsCount, total: totalSkillsCount })}
+                </span>
+              </div>
+
+              {/* Search input */}
+              <div style={{ position: "relative", display: "flex", alignItems: "center", width: "100%" }}>
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{ position: "absolute", left: 7, color: "var(--text-dim)", pointerEvents: "none" }}
+                >
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape" && searchQuery) {
+                      e.stopPropagation();
+                      setSearchQuery("");
+                    }
+                  }}
+                  placeholder={t("skills.searchPlaceholder") ?? "搜索技能…"}
+                  style={{
+                    width: "100%",
+                    height: 26,
+                    padding: "0 22px 0 24px",
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 5,
+                    fontSize: 11.5,
+                    color: "var(--text)",
+                    outline: "none",
+                  }}
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    style={{
+                      position: "absolute",
+                      right: 5,
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      width: 16,
+                      height: 16,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "var(--text-dim)",
+                      cursor: "pointer",
+                      fontSize: 12,
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {/* Filter Pills & Batch Action Toolbar */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4, flexWrap: "wrap" }}>
+                {/* Status Filter (全部 / 已启用 / 已禁用) */}
+                <div style={{ display: "flex", gap: 1, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, padding: 1 }}>
+                  {(["all", "enabled", "disabled"] as const).map((s) => {
+                    const active = statusFilter === s;
+                    const label = s === "all" ? (t("skills.filterAll") ?? "全部") : s === "enabled" ? (t("skills.filterEnabled") ?? "已启用") : (t("skills.filterDisabled") ?? "已禁用");
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setStatusFilter(s)}
+                        style={{
+                          padding: "1px 6px",
+                          fontSize: 10.5,
+                          background: active ? "var(--bg-selected, var(--bg-hover))" : "none",
+                          color: active ? "var(--text)" : "var(--text-muted)",
+                          fontWeight: active ? 600 : 400,
+                          border: "none",
+                          borderRadius: 3,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Batch Enable/Disable for visible list */}
+                <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    disabled={batchUpdating || filteredSkills.length === 0}
+                    onClick={() => void batchToggle(filteredSkills, false)}
+                    title={t("skills.enableAll") ?? "全部启用"}
+                    style={{
+                      padding: "1px 5px",
+                      fontSize: 10.5,
+                      background: "none",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      color: "var(--accent)",
+                      cursor: batchUpdating || filteredSkills.length === 0 ? "default" : "pointer",
+                      opacity: batchUpdating || filteredSkills.length === 0 ? 0.5 : 1,
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                  >
+                    {t("skills.enableAll") ?? "全部启用"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={batchUpdating || filteredSkills.length === 0}
+                    onClick={() => void batchToggle(filteredSkills, true)}
+                    title={t("skills.disableAll") ?? "全部禁用"}
+                    style={{
+                      padding: "1px 5px",
+                      fontSize: 10.5,
+                      background: "none",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      color: "var(--text-muted)",
+                      cursor: batchUpdating || filteredSkills.length === 0 ? "default" : "pointer",
+                      opacity: batchUpdating || filteredSkills.length === 0 ? 0.5 : 1,
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                  >
+                    {t("skills.disableAll") ?? "全部禁用"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Active Filters Clear Row */}
+              {hasActiveFilters && (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10.5 }}>
+                  <span style={{ color: "var(--text-dim)" }}>
+                    {filteredSkills.length} / {totalSkillsCount}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={clearFilters}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "var(--accent)",
+                      cursor: "pointer",
+                      padding: 0,
+                      fontSize: 10.5,
+                    }}
+                  >
+                    {t("skills.clearFilter") ?? "清空筛选"}
+                  </button>
+                </div>
+              )}
+
+              {/* Batch update loading banner */}
+              {batchUpdating && (
+                <div style={{ fontSize: 10.5, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
+                  <span>{t("skills.batchUpdating") ?? "正在批量更新…"}</span>
+                </div>
+              )}
+            </div>
+
             <ConfigSidebarList>
               {loading ? (
                 <div className="config-sidebar-message">
@@ -761,9 +1025,30 @@ export function SkillsConfig({
                 <div className="config-sidebar-message is-empty">
                    {t("i18n.noSkills")}
                 </div>
+              ) : filteredSkills.length === 0 ? (
+                <div className="config-sidebar-message is-empty" style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center", padding: "16px 8px" }}>
+                  <span>{t("skills.noMatches") ?? "未找到匹配的技能"}</span>
+                  {hasActiveFilters && (
+                    <button
+                      type="button"
+                      onClick={clearFilters}
+                      style={{
+                        background: "none",
+                        border: "1px solid var(--border)",
+                        borderRadius: 4,
+                        padding: "2px 8px",
+                        fontSize: 11,
+                        color: "var(--accent)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("skills.clearFilter") ?? "清空筛选"}
+                    </button>
+                  )}
+                </div>
               ) : (
                 (() => {
-                  const groups: { label: string; skills: typeof skills }[] = [];
+                  const groups: { label: string; skills: typeof filteredSkills }[] = [];
                   const scopeLabels = {
                     project: t("skills.scope.project"),
                     global: t("skills.scope.global"),
@@ -800,7 +1085,7 @@ export function SkillsConfig({
                     },
                   ];
                   for (const { label, matches } of groupDefinitions) {
-                    const grpSkills = skills.filter(matches);
+                    const grpSkills = filteredSkills.filter(matches);
                     if (grpSkills.length > 0)
                       groups.push({ label, skills: grpSkills });
                   }
@@ -836,11 +1121,42 @@ export function SkillsConfig({
                   };
                   return groups.map(
                     ({ label: grpLabel, skills: grpSkills }) => {
+                      const groupAllEnabled = grpSkills.every((s) => !s.disableModelInvocation);
                       return (
                         <div key={grpLabel} className="config-sidebar-group">
-                          <ConfigSidebarGroupLabel>
-                            {grpLabel}
-                          </ConfigSidebarGroupLabel>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingRight: 4 }}>
+                            <ConfigSidebarGroupLabel>
+                              {grpLabel}
+                            </ConfigSidebarGroupLabel>
+                            <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                              <span style={{ fontSize: 10, color: "var(--text-dim)", marginRight: 2 }}>
+                                {grpSkills.filter((s) => !s.disableModelInvocation).length}/{grpSkills.length}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={batchUpdating}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void batchToggle(grpSkills, groupAllEnabled);
+                                }}
+                                title={groupAllEnabled ? (t("skills.disableAll") ?? "禁用该组") : (t("skills.enableAll") ?? "启用该组")}
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  padding: "1px 4px",
+                                  fontSize: 10,
+                                  color: groupAllEnabled ? "var(--text-muted)" : "var(--accent)",
+                                  cursor: batchUpdating ? "default" : "pointer",
+                                  borderRadius: 3,
+                                  opacity: batchUpdating ? 0.5 : 1,
+                                }}
+                                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                              >
+                                {groupAllEnabled ? (t("skills.disableAll") ?? "禁用") : (t("skills.enableAll") ?? "启用")}
+                              </button>
+                            </div>
+                          </div>
                           {orderSkillsByDormancy(grpSkills).map(renderSkillRow)}
                         </div>
                       );

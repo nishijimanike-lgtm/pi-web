@@ -28,13 +28,29 @@ export async function GET(req: Request) {
   }
 }
 
-// PATCH /api/skills — toggle disable-model-invocation on a SKILL.md file
+// PATCH /api/skills — toggle disable-model-invocation on SKILL.md file(s)
 export async function PATCH(req: Request) {
   try {
-    const body = await req.json() as { filePath: string; disableModelInvocation: boolean };
-    const { filePath, disableModelInvocation } = body;
-    if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
-    if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
+    const body = (await req.json()) as {
+      filePath?: string;
+      disableModelInvocation?: boolean;
+      items?: { filePath: string; disableModelInvocation: boolean }[];
+    };
+
+    const items: { filePath: string; disableModelInvocation: boolean }[] = [];
+    if (Array.isArray(body.items)) {
+      items.push(...body.items);
+    } else if (typeof body.filePath === "string") {
+      items.push({
+        filePath: body.filePath,
+        disableModelInvocation: Boolean(body.disableModelInvocation),
+      });
+    }
+
+    if (items.length === 0) {
+      return NextResponse.json({ error: "filePath or items required" }, { status: 400 });
+    }
+
     const allowedRoots = new Set(await getAllowedFileRoots());
     allowedRoots.add(getAgentDir());
     // Globally installed skills live in ~/.agents/skills and are symlinked into
@@ -43,14 +59,23 @@ export async function PATCH(req: Request) {
     // too (the SDK always treats ~/.agents/skills as trusted).
     const globalSkillsDir = path.join(homedir(), ".agents", "skills");
     if (existsSync(globalSkillsDir)) allowedRoots.add(globalSkillsDir);
-    if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+
+    for (const item of items) {
+      if (!existsSync(item.filePath)) {
+        return NextResponse.json({ error: `File not found: ${item.filePath}` }, { status: 404 });
+      }
+      if (!isExistingFilePathAllowed(item.filePath, allowedRoots)) {
+        return NextResponse.json({ error: `Access denied: ${item.filePath}` }, { status: 403 });
+      }
     }
 
-    const content = readFileSync(filePath, "utf8");
-    const updated = setDisableModelInvocation(content, disableModelInvocation);
-    writeFileSync(filePath, updated, "utf8");
-    return NextResponse.json({ success: true });
+    for (const item of items) {
+      const content = readFileSync(item.filePath, "utf8");
+      const updated = setDisableModelInvocation(content, item.disableModelInvocation);
+      writeFileSync(item.filePath, updated, "utf8");
+    }
+
+    return NextResponse.json({ success: true, count: items.length });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
