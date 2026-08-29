@@ -11,7 +11,7 @@ import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { isEditToolName } from "@/lib/tool-names";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
-import { skillExpansionToCommand } from "@/lib/slash-display";
+import { skillExpansionToCommand, stripSkillExpansions } from "@/lib/slash-display";
 import type { SubagentToolDetails } from "@/lib/subagent-extension";
 import type {
   AgentMessage,
@@ -318,6 +318,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       : message.content.filter((b): b is ImageContent => b.type === "image");
 
   const commandText = skillExpansionToCommand(content);
+  const displayContent = commandText ?? stripSkillExpansions(content);
   const commandSeparator = commandText?.search(/\s/) ?? -1;
   const commandName = commandText
     ? commandSeparator === -1 ? commandText : commandText.slice(0, commandSeparator)
@@ -328,8 +329,10 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
   const time = formatTime(message.timestamp);
   const canFork = !!entryId && !!onFork;
-  const copyTarget = commandText ?? content;
-  const editTarget = commandText ? replaceUserMessageText(message, commandText) : message;
+  const copyTarget = commandText ?? displayContent;
+  const editTarget = commandText
+    ? replaceUserMessageText(message, commandText)
+    : replaceUserMessageText(message, displayContent);
 
   const imageBlocksNode = imageBlocks.length > 0 && (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content ? 8 : 0 }}>
@@ -451,7 +454,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           ) : (
           <>
           {imageBlocksNode}
-          {content && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</SafeMarkdownBody>}
+          {displayContent && <SafeMarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayContent}</SafeMarkdownBody>}
           </>
           )}
         </div>

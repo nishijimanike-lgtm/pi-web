@@ -38,6 +38,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
+import { expandInlineSkills } from "./skill-inline";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -577,7 +578,12 @@ export class AgentSessionWrapper {
           this.pendingPromptCount += 1;
           let prompt: Promise<void>;
           try {
-            prompt = this.inner.prompt(command.message as string, {
+            const rawMessage = (command.message as string) ?? "";
+            const expandedMessage = expandInlineSkills(
+              rawMessage,
+              this.inner.resourceLoader.getSkills().skills,
+            );
+            prompt = this.inner.prompt(expandedMessage, {
               ...(promptImages?.length ? { images: promptImages } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
               source: "rpc",
@@ -810,13 +816,23 @@ export class AgentSessionWrapper {
 
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
+        const rawMessage = (command.message as string) ?? "";
+        const expandedMessage = expandInlineSkills(
+          rawMessage,
+          this.inner.resourceLoader.getSkills().skills,
+        );
+        await this.inner.steer(expandedMessage, steerImages?.length ? steerImages : undefined);
         return null;
       }
 
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
+        const rawMessage = (command.message as string) ?? "";
+        const expandedMessage = expandInlineSkills(
+          rawMessage,
+          this.inner.resourceLoader.getSkills().skills,
+        );
+        await this.inner.followUp(expandedMessage, followImages?.length ? followImages : undefined);
         return null;
       }
 

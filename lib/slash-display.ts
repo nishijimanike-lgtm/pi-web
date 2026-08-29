@@ -20,3 +20,14 @@ export function skillExpansionToCommand(text: string): string | null {
   const [, name, , , args] = match;
   return args ? `/skill:${name} ${args}` : `/skill:${name}`;
 }
+
+const SKILL_BLOCK_GLOBAL_RE =
+  /<skill name="[^"\n]+" location="[^"\n]+">\nReferences are relative to [^\n]+\.\n\n[\s\S]*?\n<\/skill>(?:\n\n)?/g;
+
+/**
+ * Strip leading skill expansion envelopes from a message for clean user display.
+ */
+export function stripSkillExpansions(text: string): string {
+  if (!text || !text.startsWith("<skill name=\"")) return text;
+  return text.replace(SKILL_BLOCK_GLOBAL_RE, "").trimStart();
+}

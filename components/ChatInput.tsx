@@ -22,6 +22,7 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { extractSlashQuery, type SlashQueryMatch } from "@/lib/skill-inline";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
@@ -87,6 +88,8 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
   rekeyDraft: (previousKey: string, nextKey: string) => void;
   restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: string) => void;
+  setModel?: (provider: string, modelId: string) => void;
+  getModel?: () => { provider: string; modelId: string } | null;
 }
 
 const TOOL_PRESETS = ["chat-only", "read-only", "default", "full"] as const;
@@ -186,10 +189,11 @@ const SLASH_SOURCE_ORDER: Record<SlashCommandSource, number> = {
 
 function slashMatchRank(command: SlashCommandPaletteItem, query: string, t: (key: string) => string): number {
   const name = command.name.toLowerCase();
+  const cleanSkillName = name.startsWith("skill:") ? name.slice("skill:".length) : name;
   const description = getSlashDescription(command, t).toLowerCase();
-  if (name === query) return 0;
-  if (name.startsWith(query)) return 1;
-  if (name.includes(query)) return 2;
+  if (name === query || cleanSkillName === query) return 0;
+  if (name.startsWith(query) || cleanSkillName.startsWith(query)) return 1;
+  if (name.includes(query) || cleanSkillName.includes(query)) return 2;
   if (description.includes(query)) return 3;
   return 4;
 }
@@ -458,6 +462,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
+  const [slashQueryMatch, setSlashQueryMatch] = useState<SlashQueryMatch | null>(null);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashMenuMaxHeight, setSlashMenuMaxHeight] = useState<number | null>(null);
@@ -507,6 +512,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       valueRef.current = text;
       setValue(text);
       setAtQuery(null);
+      setSlashQueryMatch(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -525,6 +531,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       attachedImagesRef.current = restoredImages;
       setValue(restoredText);
       setAtQuery(null);
+      setSlashQueryMatch(null);
       setHistoryMenuOpen(false);
       setAttachedImages((prev) => {
         prev.forEach(revokeImagePreview);
@@ -547,6 +554,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       valueRef.current = combined;
       setValue(combined);
       setAtQuery(null);
+      setSlashQueryMatch(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -585,6 +593,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return movedImages;
       });
       setAtQuery(null);
+      setSlashQueryMatch(null);
       setHistoryMenuOpen(false);
     },
     restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: string) {
@@ -631,6 +640,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return restored;
       });
       setAtQuery(null);
+      setSlashQueryMatch(null);
       setHistoryMenuOpen(false);
       if (images?.length) {
         setAttachedImages((current) => {
@@ -666,6 +676,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       valueRef.current = newVal;
       setValue(newVal);
       setAtQuery(null);
+      setSlashQueryMatch(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         const pos = start + sep.length + text.length;
@@ -677,6 +688,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
     addImages(files: File[]) {
       processImageFiles(files);
+    },
+    setModel(newProvider: string, newModelId: string) {
+      onModelChange?.(newProvider, newModelId);
+    },
+    getModel() {
+      return model ? { provider: model.provider, modelId: model.modelId } : null;
     },
   }));
 
@@ -731,6 +748,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     valueRef.current = "";
     setValue("");
     setAtQuery(null);
+    setSlashQueryMatch(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
@@ -767,6 +785,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     attachedImagesRef.current = nextImages;
     setValue(nextValue);
     setAtQuery(null);
+    setSlashQueryMatch(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
@@ -806,9 +825,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     onSend(msg, attachedImages.length ? attachedImages : undefined);
   }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
-  const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
-    ? value.slice(1).toLowerCase()
-    : null;
+  const updateSlashQuery = useCallback((text: string, cursor: number | null) => {
+    const pos = cursor ?? text.length;
+    setSlashQueryMatch(extractSlashQuery(text.slice(0, pos)));
+  }, []);
+
+  const slashQuery = slashQueryMatch?.query ?? null;
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
@@ -819,8 +841,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
+        const cleanSkillName = name.startsWith("skill:") ? name.slice("skill:".length) : name;
         const description = getSlashDescription(command, t).toLowerCase();
-        return name.includes(slashQuery) || description.includes(slashQuery);
+        return (
+          name.includes(slashQuery) ||
+          cleanSkillName.includes(slashQuery) ||
+          description.includes(slashQuery)
+        );
       })
       .sort((a, b) => {
         const rankDelta = slashMatchRank(a, slashQuery, t) - slashMatchRank(b, slashQuery, t);
@@ -998,6 +1025,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setHistoryMenuOpen(false);
     setHistoryActiveIndex(0);
     setAtQuery(null);
+    setSlashQueryMatch(null);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
@@ -1009,19 +1037,42 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
-    const nextValue = `/${command.name} `;
-    setValue(nextValue);
+    const ta = textareaRef.current;
+    const cursor = ta?.selectionStart ?? value.length;
+
+    if (!slashQueryMatch) {
+      const nextValue = `/${command.name} `;
+      setValue(nextValue);
+      setSlashMenuOpen(false);
+      setSlashActiveIndex(0);
+      return;
+    }
+
+    const before = value.slice(0, slashQueryMatch.start);
+    const after = value.slice(cursor);
+
+    let insertName = command.name;
+    if (slashQueryMatch.prefixChar === "\\" && insertName.startsWith("skill:")) {
+      insertName = insertName.slice("skill:".length);
+    }
+    const insert = `${slashQueryMatch.prefixChar}${insertName} `;
+    const newValue = before + insert + after;
+    const newPos = before.length + insert.length;
+
+    valueRef.current = newValue;
+    setValue(newValue);
+    setSlashQueryMatch(null);
     setSlashMenuOpen(false);
     setSlashActiveIndex(0);
     requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(nextValue.length, nextValue.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(newPos, newPos);
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [slashQueryMatch, value]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -1150,6 +1201,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         if (e.key === "Escape") {
           e.preventDefault();
           setSlashMenuOpen(false);
+          setSlashQueryMatch(null);
           return;
         }
         const selectedCommand = displayedSlashCommands[slashActiveIndex];
@@ -1242,8 +1294,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     processImageFiles(files);
   }, [processImageFiles]);
 
+  const slashTokenKey =
+    slashQueryMatch === null
+      ? null
+      : `${slashQueryMatch.start}:${slashQueryMatch.prefixChar}:${slashQueryMatch.query}`;
   useEffect(() => {
-    if (slashQuery === null) {
+    if (slashTokenKey === null) {
       setSlashMenuOpen(false);
       setSlashActiveIndex(0);
       slashCommandsRequestedRef.current = false;
@@ -1257,7 +1313,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         slashCommandsRequestedRef.current = false;
       });
     }
-  }, [slashQuery, onLoadSlashCommands]);
+  }, [slashTokenKey, onLoadSlashCommands]);
 
   // Lazy-load skill dormancy (disable-model-invocation) each time the slash
   // palette opens, so toggles made in the skills panel are reflected on the
@@ -1770,7 +1826,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                 wordBreak: "break-word",
                                 color: dormant ? "var(--text-dim)" : undefined,
                               }}>
-                                /{command.name}
+                                {slashQueryMatch?.prefixChar ?? "/"}{command.name.startsWith("skill:") && slashQueryMatch?.prefixChar === "\\" ? command.name.slice("skill:".length) : command.name}
                                 {dormant && (
                                   <span style={{
                                     marginLeft: 6,
@@ -1929,10 +1985,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              updateSlashQuery(e.target.value, e.target.selectionStart);
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              updateSlashQuery(el.value, el.selectionStart);
             }}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {
@@ -1943,6 +2001,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              updateSlashQuery(el.value, el.selectionStart);
             }}
             onInput={handleInput}
             onPaste={handlePaste}

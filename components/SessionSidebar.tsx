@@ -5,7 +5,7 @@ import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
-import { skillExpansionToCommand } from "@/lib/slash-display";
+import { skillExpansionToCommand, stripSkillExpansions } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
@@ -1944,7 +1944,7 @@ function SessionItem({
   // A stored first message may be an SDK-expanded <skill> block; collapse it
   // back to the compact /skill:name args command the user typed before using
   // it as the auto-name fallback, mirroring MessageView's rendering.
-  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
+  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? stripSkillExpansions(session.firstMessage) ?? session.firstMessage;
   const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
 
   const startRename = useCallback((e: React.MouseEvent) => {
