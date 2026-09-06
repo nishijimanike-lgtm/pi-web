@@ -49,6 +49,8 @@ export const zhTWLocale: LocalePlugin = {
     "mcp.noServers": "尚無已設定的 MCP 服務",
     "mcp.noProjectServers": "本專案尚無專屬 MCP 服務",
     "mcp.presets": "常用預設範本",
+    "mcp.discovered": "偵測到系統已設定的外部服務",
+    "mcp.quickImport": "快速匯入",
     "settings.title": "設定",
     "settings.general": "一般",
     "settings.generalDescription": "選擇 Pi Web 的外觀與介面語言。",

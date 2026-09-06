@@ -58,9 +58,10 @@ export async function POST(req: Request) {
         }, 3000);
 
         try {
+          const useShell = process.platform === "win32" && (command.endsWith(".cmd") || command.endsWith(".bat"));
           proc = spawn(command, args, {
             env,
-            shell: process.platform === "win32",
+            shell: useShell,
             windowsHide: true,
           });
 

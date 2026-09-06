@@ -49,6 +49,8 @@ export const enLocale: LocalePlugin = {
     "mcp.noServers": "No MCP servers configured",
     "mcp.noProjectServers": "No project-specific MCP servers",
     "mcp.presets": "Preset Templates",
+    "mcp.discovered": "Discovered external servers",
+    "mcp.quickImport": "Quick Import",
     "settings.title": "Settings",
     "settings.general": "General",
     "settings.generalDescription": "Choose how Pi Web looks and which language it uses.",

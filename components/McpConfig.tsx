@@ -53,6 +53,9 @@ interface ServerFormState {
   description: string;
   disabled: boolean;
 }
+interface DiscoveredMcpServer extends McpServerConfig {
+  source: string;
+}
 
 interface McpPreset {
   id: string;
@@ -120,6 +123,54 @@ const MCP_PRESETS: McpPreset[] = [
     },
   },
   {
+    id: "word-document",
+    label: "Word Document",
+    description: "Create, inspect, and edit Microsoft Word (.docx) documents",
+    defaultConfig: {
+      type: "stdio",
+      command: "uvx",
+      args: ["--from", "office-word-mcp-server", "word_mcp_server"],
+      env: { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+      description: "Word Document MCP Server",
+    },
+  },
+  {
+    id: "pdf-manipulation",
+    label: "PDF Manipulation",
+    description: "Extract text, split, merge, and inspect PDF files",
+    defaultConfig: {
+      type: "stdio",
+      command: "uvx",
+      args: ["--from", "pdf-manipulation-mcp-server", "--with", "mcp<2", "--with", "pymupdf<1.25.0", "pdf-mcp-server"],
+      env: { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+      description: "PDF Manipulation MCP Server",
+    },
+  },
+  {
+    id: "sas",
+    label: "SAS 9.4 Statistical",
+    description: "SAS 9.4 batch processing and dataset conversion bridge",
+    defaultConfig: {
+      type: "stdio",
+      command: "D:\\统计分析\\sas-mcp-server\\.venv\\Scripts\\python.exe",
+      args: ["D:\\统计分析\\sas-mcp-server\\server.py"],
+      env: { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1", SAS_MCP_SERVER_DIR: "D:\\统计分析\\sas-mcp-server" },
+      description: "SAS 9.4 statistical analysis MCP server",
+    },
+  },
+  {
+    id: "powerpoint",
+    label: "PowerPoint (ppt-mcp)",
+    description: "Live control of Microsoft PowerPoint via COM automation (156 tools)",
+    defaultConfig: {
+      type: "stdio",
+      command: "uvx",
+      args: ["ppt-mcp"],
+      env: { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1", PPT_AUTO_DISMISS_DIALOG: "true" },
+      description: "PowerPoint MCP Server (ppt-mcp)",
+    },
+  },
+  {
     id: "sqlite",
     label: "SQLite Database",
     description: "Inspect and query SQLite databases",
@@ -128,6 +179,17 @@ const MCP_PRESETS: McpPreset[] = [
       command: "uvx",
       args: ["mcp-server-sqlite", "--db-path", "./data.db"],
       description: "SQLite database explorer",
+    },
+  },
+  {
+    id: "drawio",
+    label: "Draw.io Diagrams",
+    description: "Official draw.io MCP server (XML, CSV, Mermaid diagrams)",
+    defaultConfig: {
+      type: "stdio",
+      command: "node",
+      args: ["C:\\Users\\zhang\\AppData\\Roaming\\npm\\node_modules\\@drawio\\mcp\\src\\index.js"],
+      description: "Official draw.io MCP server",
     },
   },
   {
@@ -193,6 +255,7 @@ export function McpConfig({ embedded = false, cwd, sessionId, onClose, onReloade
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [discoveredServers, setDiscoveredServers] = useState<DiscoveredMcpServer[]>([]);
 
   const selectServer = useCallback((server: McpServerConfig) => {
     const key = `${server.scope}:${server.name}`;
@@ -252,9 +315,28 @@ export function McpConfig({ embedded = false, cwd, sessionId, onClose, onReloade
     void fetchServers();
   }, [fetchServers]);
 
-  const handleStartNew = (preset?: McpPreset) => {
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/mcp/discover")
+      .then((res) => res.json())
+      .then((data: { discovered?: DiscoveredMcpServer[] }) => {
+        if (!cancelled && Array.isArray(data.discovered)) {
+          setDiscoveredServers(data.discovered);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleStartNew = (preset?: McpPreset | DiscoveredMcpServer) => {
     const initScope: "global" | "project" = cwd ? "project" : "global";
-    const baseConfig = preset?.defaultConfig ?? {};
+    const baseConfig: Partial<McpServerConfig> =
+      preset && "defaultConfig" in preset
+        ? preset.defaultConfig
+        : (preset ?? {});
+    const presetDesc = preset && "description" in preset && typeof preset.description === "string" ? preset.description : "";
     const key = "__new__";
     setSelectedKey(key);
     setTestResult(null);
@@ -262,14 +344,14 @@ export function McpConfig({ embedded = false, cwd, sessionId, onClose, onReloade
     setForm({
       isNew: true,
       originalName: "",
-      name: preset?.id ?? "",
+      name: preset ? ("id" in preset ? preset.id : preset.name) : "",
       scope: initScope,
       type: (baseConfig.type as McpTransportType) ?? "stdio",
       command: baseConfig.command ?? "",
       argsText: argsToText(baseConfig.args),
       envText: envToText(baseConfig.env),
       url: baseConfig.url ?? "",
-      description: baseConfig.description ?? preset?.description ?? "",
+      description: baseConfig.description ?? presetDesc,
       disabled: false,
     });
   };
@@ -693,6 +775,43 @@ export function McpConfig({ embedded = false, cwd, sessionId, onClose, onReloade
                         }}
                       >
                         {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </ConfigField>
+              )}
+
+              {form.isNew && discoveredServers.length > 0 && (
+                <ConfigField label={t("mcp.discovered")}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      flexWrap: "wrap",
+                      marginBottom: 8,
+                    }}
+                  >
+                    {discoveredServers.map((item) => (
+                      <button
+                        key={`${item.source}:${item.name}`}
+                        type="button"
+                        onClick={() => handleStartNew(item)}
+                        title={item.description}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 8px",
+                          borderRadius: 4,
+                          border: "1px solid var(--accent)",
+                          background: "var(--bg-selected, rgba(59, 130, 246, 0.12))",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <span style={{ fontWeight: 600 }}>{item.name}</span>
+                        <span style={{ fontSize: 9.5, opacity: 0.75, textTransform: "uppercase" }}>{item.source}</span>
                       </button>
                     ))}
                   </div>
