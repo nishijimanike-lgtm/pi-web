@@ -18,7 +18,9 @@ export interface SlashQueryMatch {
  * The slash or backslash must be at the start of text or preceded by whitespace,
  * preventing Windows paths like C:\foo\bar from triggering.
  */
-export function extractSlashQuery(textBeforeCursor: string): SlashQueryMatch | null {
+export function extractSlashQuery(
+  textBeforeCursor: string,
+): SlashQueryMatch | null {
   const match = /(?:^|\s)([\\/])([^\s\\/]*)$/.exec(textBeforeCursor);
   if (!match) return null;
 
@@ -43,7 +45,8 @@ function dirnameEnvPath(path?: string): string {
     normalized.lastIndexOf("/"),
     normalized.lastIndexOf("\\"),
   );
-  if (separatorIndex === 2 && normalized[1] === ":") return normalized.slice(0, 3);
+  if (separatorIndex === 2 && normalized[1] === ":")
+    return normalized.slice(0, 3);
   return separatorIndex <= 0 ? "/" : normalized.slice(0, separatorIndex);
 }
 
@@ -58,7 +61,7 @@ export function expandInlineSkills(
 ): string {
   if (!message || availableSkills.length === 0) return message;
   // If message already starts with a skill block envelope, do not re-expand
-  if (message.startsWith("<skill name=\"")) return message;
+  if (message.startsWith('<skill name="')) return message;
 
   const map = new Map<string, LoadedSkillItem>();
   for (const s of availableSkills) {
@@ -85,7 +88,9 @@ export function expandInlineSkills(
     .map((skill) => {
       const loc = skill.filePath ? ` location="${skill.filePath}"` : "";
       const dir = dirnameEnvPath(skill.filePath);
-      const body = skill.content ? `\nReferences are relative to ${dir}.\n\n${skill.content}` : "";
+      const body = skill.content
+        ? `\nReferences are relative to ${dir}.\n\n${skill.content}`
+        : "";
       return `<skill name="${skill.name}"${loc}>${body}\n</skill>`;
     })
     .join("\n\n");

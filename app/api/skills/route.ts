@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { setDisableModelInvocation } from "@/lib/skill-frontmatter";
+import { isFileDisabledPath, toEnabledSkillPath } from "@/lib/skill-file-disabled";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +29,10 @@ export async function GET(req: Request) {
   }
 }
 
-// PATCH /api/skills — toggle disable-model-invocation on SKILL.md file(s)
+// PATCH /api/skills — toggle skill enabled state.
+// - SKILL.md files: set/clear the disable-model-invocation frontmatter key (pi-web native).
+// - SKILL.md.disabled files (skill-hub-style rename): enabling renames the file back to
+//   SKILL.md and clears the frontmatter key; disabling keeps the rename (already disabled).
 export async function PATCH(req: Request) {
   try {
     const body = (await req.json()) as {
@@ -70,6 +74,29 @@ export async function PATCH(req: Request) {
     }
 
     for (const item of items) {
+      if (isFileDisabledPath(item.filePath)) {
+        // skill-hub 风格禁用：物理重命名 SKILL.md -> SKILL.md.disabled。
+        // 启用 = 重命名回 SKILL.md 并清除 frontmatter 标记（避免残留的
+        // disable-model-invocation 让重命名后的技能仍处于禁用状态）；
+        // 禁用 = 文件本身已是禁用态，补写标记保证两套机制状态一致。
+        if (item.disableModelInvocation) {
+          const content = readFileSync(item.filePath, "utf8");
+          writeFileSync(item.filePath, setDisableModelInvocation(content, true), "utf8");
+        } else {
+          const target = toEnabledSkillPath(item.filePath);
+          if (existsSync(target)) {
+            return NextResponse.json(
+              { error: `Cannot enable: ${target} already exists. Remove it first so the disabled copy can be restored.` },
+              { status: 409 },
+            );
+          }
+          const content = readFileSync(item.filePath, "utf8");
+          const updated = setDisableModelInvocation(content, false);
+          renameSync(item.filePath, target);
+          writeFileSync(target, updated, "utf8");
+        }
+        continue;
+      }
       const content = readFileSync(item.filePath, "utf8");
       const updated = setDisableModelInvocation(content, item.disableModelInvocation);
       writeFileSync(item.filePath, updated, "utf8");

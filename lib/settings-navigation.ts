@@ -4,6 +4,7 @@ export const SETTINGS_SECTION_VALUES = [
   "skills",
   "agents",
   "plugins",
+  "mcp",
 ] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTION_VALUES)[number];
@@ -57,7 +58,7 @@ function readState(storage: StorageLike): SettingsNavigationState {
 }
 
 function selectionKey(section: SettingsDetailSection, cwd?: string | null): string | null {
-  if (section === "models") return section;
+  if (section === "models" || section === "mcp") return section;
   return cwd ? JSON.stringify([section, cwd]) : null;
 }
 

@@ -130,7 +130,9 @@ function SkillDetail({
         <div className="skill-detail-status-row">
           {!enabled && (
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-              {t("i18n.hiddenButInvocable")}
+              {skill.disabledByFile
+                ? t("i18n.disabledByFileRename")
+                : t("i18n.hiddenButInvocable")}
             </span>
           )}
           {saveError && (
@@ -725,6 +727,9 @@ export function SkillsConfig({
             : s,
         ),
       );
+      // A file-disabled skill (SKILL.md.disabled) is renamed to SKILL.md on enable,
+      // so its filePath changes; refresh the list to pick up the new path.
+      if (skill.disabledByFile && !next) await loadSkills();
     } catch (e) {
       setSaveError(String(e));
     } finally {
@@ -734,7 +739,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, []);
+  }, [loadSkills]);
   const filteredSkills = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return skills.filter((skill) => {
@@ -790,12 +795,15 @@ export function SkillsConfig({
       setSkills((prev) =>
         prev.map((s) => (updatedPaths.has(s.filePath) ? { ...s, disableModelInvocation: disable } : s)),
       );
+      // Enabling a file-disabled skill renames SKILL.md.disabled -> SKILL.md, so the
+      // filePath changes; refresh the list to pick up the new paths.
+      if (needUpdate.some((s) => s.disabledByFile && !disable)) await loadSkills();
     } catch (e) {
       setSaveError(String(e));
     } finally {
       setBatchUpdating(false);
     }
-  }, []);
+  }, [loadSkills]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 

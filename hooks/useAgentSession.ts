@@ -246,6 +246,8 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
   rekeyDraft: (previousKey: string, nextKey: string) => void;
   restoreSubmission: (text: string, images?: Array<{ data: string; mimeType: string }>, targetDraftKey?: string) => void;
+  setModel?: (provider: string, modelId: string) => void;
+  getModel?: () => { provider: string; modelId: string } | null;
 }
 
 export interface AttachedImage {

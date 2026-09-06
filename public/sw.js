@@ -55,8 +55,9 @@ self.addEventListener("fetch", (event) => {
   }
 
   const isStaticAsset =
-    url.pathname.startsWith("/_next/static/") ||
-    PRECACHE_URLS.includes(url.pathname);
+    CACHE_VERSION !== "dev" &&
+    (url.pathname.startsWith("/_next/static/") ||
+      PRECACHE_URLS.includes(url.pathname));
 
   if (isStaticAsset) {
     event.respondWith(cacheFirst(request));

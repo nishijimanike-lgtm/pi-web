@@ -232,3 +232,66 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 --accent --user-bg --tool-bg
 --font-mono
 ```
+
+---
+
+## Upstream Synchronization & Branching Strategy
+
+This repository is a fork of upstream [`agegr/pi-web`](https://github.com/agegr/pi-web). To preserve local custom features (e.g., MCP management, i18n localization, custom startup scripts) while staying up-to-date with upstream releases, follow this branching and integration policy:
+
+### Branch Model
+
+```
+upstream/main (agegr/pi-web) ─── fetch & ff-only
+                                       │
+                                       ▼
+local `upstream-main` ────────── (pure mirror, NEVER commit local code here)
+        │
+        │ git merge upstream-main
+        ▼
+local `main` ─────────────────── (local integration branch, pushed to origin)
+        ▲
+        │ merge / PR
+feature/* (e.g., feature/mcp-support) ── (isolated local customizations)
+```
+
+1. **`upstream-main` (Clean Tracking Branch)**:
+   - Tracks `upstream/main` directly.
+   - Kept strictly identical to upstream via fast-forward only (`git merge --ff-only`).
+   - Pushed to `origin/upstream-main` as a backup mirror.
+2. **`main` (Local Production / Integration Branch)**:
+   - Incorporates stable local additions and upstream updates.
+   - Pushed to `origin/main`.
+3. **`feature/*` (Custom Feature Branches)**:
+   - Developed off `main` for non-trivial modifications to isolate changes and minimize merge conflicts.
+
+### Standard Synchronization Workflow
+
+Ensure the working tree is clean (stash or commit local changes) before syncing:
+
+```bash
+# 1. Fetch all updates and tags from upstream
+git fetch upstream --prune --tags
+
+# 2. Advance the clean upstream mirror
+git checkout upstream-main
+git merge upstream/main --ff-only
+git push origin upstream-main
+
+# 3. Merge updates into local main
+git checkout main
+git merge upstream-main -m "chore: merge upstream changes"
+
+# 4. Validate types and code health (NEVER run next build)
+node_modules/.bin/tsc --noEmit
+npm run lint
+
+# 5. Push integrated updates to personal remote
+git push origin main
+```
+
+### Merge Conflict & Rebase Policy
+- **Prefer `git merge` over `rebase` on `main`**: Preserves true project history without rewriting pushed commits on `origin/main`.
+- **Conflict Hotspots**: Pay extra attention to shared entrypoints (`package.json`, `components/SettingsPanel.tsx`, `hooks/useAgentSession.ts`). Always retain both upstream fixes/dependencies and local feature extensions.
+- **Verification after merge**: Always run `node_modules/.bin/tsc --noEmit` to verify type safety against any updated Pi SDK or internal types.
+

@@ -55,6 +55,11 @@ export interface SkillInfo {
   filePath: string;
   baseDir: string;
   disableModelInvocation: boolean;
+  /** True when the skill is disabled by a physical rename (SKILL.md -> SKILL.md.disabled),
+   * e.g. by skill-hub-style tools. Such files are invisible to pi's loader, so pi-web
+   * surfaces them itself and re-enabling renames the file back to SKILL.md.
+   */
+  disabledByFile?: boolean;
   sourceInfo: {
     source?: string;
     scope?: string;
