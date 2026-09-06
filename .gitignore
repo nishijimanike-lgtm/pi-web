@@ -50,3 +50,13 @@ e2e_*.mjs
 
 # pi extensions runtime data
 .pi-*/
+
+# build cache
+/.buildhome/
+
+# native tray build artifacts
+/bin/pi-web-tray.exe
+/bin/pi-web-tray.pdb
+native/tray/bin/
+native/tray/obj/
+

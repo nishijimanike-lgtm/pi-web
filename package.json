@@ -15,7 +15,8 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "pi-web": "bin/pi-web.js"
+    "pi-web": "bin/pi-web.js",
+    "pi-web-tray": "bin/pi-web-tray.js"
   },
   "files": [
     "bin",
@@ -32,9 +33,17 @@
     "clean-port": "node scripts/clean-port.mjs 30141",
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
-    "build": "next build --webpack",
+    "build": "node scripts/build.mjs",
+    "build:raw": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30141",
     "start:lan": "next start -H 0.0.0.0 -p 30141",
+    "tray:build": "dotnet publish native/tray/tray.csproj -c Release -r win-x64 --self-contained false -o bin",
+    "tray:install": "node bin/pi-web-tray.js --install --start",
+    "tray:uninstall": "node bin/pi-web-tray.js --uninstall",
+    "tray:start": "node bin/pi-web-tray.js --start",
+    "tray:stop": "node bin/pi-web-tray.js --stop",
+    "tray:restart": "node bin/pi-web-tray.js --restart",
+    "tray:status": "node bin/pi-web-tray.js --status",
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
