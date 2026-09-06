@@ -7,6 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>pi-web-tray</AssemblyName>
     <RootNamespace>PiWebTray</RootNamespace>
+    <ApplicationIcon>..\..\public\icons\pi-web.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
