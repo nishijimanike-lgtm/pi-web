@@ -125,9 +125,124 @@ export async function GET() {
             }
       }
 
-  // 3. 全局安装的 npm MCP 工具 (如 @drawio/mcp)
+      // 3. Cursor MCP 配置
+      const cursorPaths = [
+            join(home, ".cursor", "mcp.json"),
+      ];
+
+      for (const p of cursorPaths) {
+            if (existsSync(p)) {
+                  try {
+                        const raw = JSON.parse(
+                              readFileSync(p, "utf8"),
+                        ) as Record<string, unknown>;
+                        const servers = (raw.mcpServers ||
+                              raw.servers ||
+                              {}) as Record<string, RawMcpServerConfig>;
+                        for (const [name, cfg] of Object.entries(servers)) {
+                              if (cfg && typeof cfg === "object") {
+                                    discovered.push({
+                                          name,
+                                          source: "Cursor",
+                                          scope: "global",
+                                          type:
+                                                (cfg.type as
+                                                      | McpTransportType
+                                                      | undefined) ||
+                                                (cfg.url ? "sse" : "stdio"),
+                                          command: cfg.command,
+                                          args: Array.isArray(cfg.args)
+                                                ? cfg.args.map(String)
+                                                : undefined,
+                                          env: cfg.env,
+                                          url: cfg.url,
+                                          disabled: cfg.disabled === true,
+                                          description: `Imported from Cursor (${name})`,
+                                    });
+                              }
+                        }
+                  } catch {
+                        // Ignore read errors
+                  }
+            }
+      }
+
+      // 4. Claude Code 配置 (~/.claude.json)
+      const claudeCodePaths = [
+            join(home, ".claude.json"),
+            join(home, ".claude", "mcp.json"),
+      ];
+
+      for (const p of claudeCodePaths) {
+            if (existsSync(p)) {
+                  try {
+                        const raw = JSON.parse(
+                              readFileSync(p, "utf8"),
+                        ) as Record<string, unknown>;
+                        const servers = (raw.mcpServers ||
+                              raw.servers ||
+                              {}) as Record<string, RawMcpServerConfig>;
+                        for (const [name, cfg] of Object.entries(servers)) {
+                              if (cfg && typeof cfg === "object") {
+                                    // 避免与已有同名重复
+                                    if (discovered.some((d) => d.name === name)) continue;
+                                    discovered.push({
+                                          name,
+                                          source: "Claude Code",
+                                          scope: "global",
+                                          type:
+                                                (cfg.type as
+                                                      | McpTransportType
+                                                      | undefined) ||
+                                                (cfg.url ? "sse" : "stdio"),
+                                          command: cfg.command,
+                                          args: Array.isArray(cfg.args)
+                                                ? cfg.args.map(String)
+                                                : undefined,
+                                          env: cfg.env,
+                                          url: cfg.url,
+                                          disabled: cfg.disabled === true,
+                                          description: `Imported from Claude Code (${name})`,
+                                    });
+                              }
+                        }
+                  } catch {
+                        // Ignore read errors
+                  }
+            }
+      }
+
+  // 5. 全局安装的 npm MCP 工具
+  const npmOfficeCli = join(home, "AppData", "Roaming", "npm", "node_modules", "@officecli", "officecli", "vendor", "officecli.exe");
+  if (existsSync(npmOfficeCli) && !discovered.some((d) => d.name === "officecli")) {
+    discovered.push({
+      name: "officecli",
+      source: "Global npm (@officecli/officecli)",
+      scope: "global",
+      type: "stdio",
+      command: npmOfficeCli,
+      args: ["mcp"],
+      disabled: false,
+      description: "officecli: AI-friendly CLI for Office documents (.docx, .xlsx, .pptx)",
+    });
+  }
+
+  const npmGitNexus = join(home, "AppData", "Roaming", "npm", "node_modules", "gitnexus", "dist", "cli", "index.js");
+  if (existsSync(npmGitNexus) && !discovered.some((d) => d.name === "gitnexus")) {
+    discovered.push({
+      name: "gitnexus",
+      source: "Global npm (gitnexus)",
+      scope: "global",
+      type: "stdio",
+      command: "node",
+      args: [npmGitNexus, "mcp"],
+      disabled: false,
+      description: "GitNexus code intelligence & knowledge graph MCP server",
+    });
+  }
+
   const npmDrawio = join(home, "AppData", "Roaming", "npm", "node_modules", "@drawio", "mcp", "src", "index.js");
-  if (existsSync(npmDrawio)) {
+  if (existsSync(npmDrawio) && !discovered.some((d) => d.name === "drawio")) {
     discovered.push({
       name: "drawio",
       source: "Global npm (@drawio/mcp)",

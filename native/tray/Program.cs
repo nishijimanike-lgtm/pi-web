@@ -445,7 +445,7 @@ class TrayApplication : IDisposable
             UpdateTrayUI();
             try
             {
-                _notifyIcon.ShowBalloonTip(2000, "Pi Web 托盘管理", $"服务已在线: {_serverUrl}", ToolTipIcon.Info);
+                _notifyIcon.ShowBalloonTip(2000, "Pi Web Tray", $"Service is online: {_serverUrl}", ToolTipIcon.Info);
             }
             catch { }
             if (_openBrowser)
