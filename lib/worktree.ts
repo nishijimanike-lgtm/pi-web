@@ -62,7 +62,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 function realPathOrSelf(filePath: string): string {
   try {
-    return realpathSync(filePath);
+    return realpathSync.native ? realpathSync.native(filePath) : realpathSync(filePath);
   } catch {
     return filePath;
   }
@@ -105,14 +105,15 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map(toNativePath);
     // git prints resolved (symlink-free) paths; normalize cwd the same way
     const realCwd = realPathOrSelf(cwd);
+    const realToplevel = realPathOrSelf(toplevel);
     // For a linked worktree, --git-dir differs from --git-common-dir.
     // Only collapse *worktree toplevels* into the main repo. A session whose
     // cwd is a subdirectory of a repo keeps its own project identity —
     // grouping subdirs under the repo root would change where new sessions
     // are created for existing users.
-    const isTopLevel = samePath(toplevel, realCwd);
+    const isTopLevel = samePath(realToplevel, realCwd);
     const isWorktreeTopLevel = !samePath(gitDir, commonDir) && isTopLevel;
-    const topLevelProjectRoot = isWorktreeTopLevel ? dirname(commonDir) : toplevel;
+    const topLevelProjectRoot = isWorktreeTopLevel ? dirname(commonDir) : realToplevel;
     info = {
       projectRoot: isTopLevel ? realPathOrSelf(topLevelProjectRoot) : cwd,
       branch: ref && ref !== "HEAD" ? ref : null,

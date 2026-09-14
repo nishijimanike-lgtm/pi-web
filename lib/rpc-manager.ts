@@ -622,9 +622,10 @@ export class AgentSessionWrapper {
           let prompt: Promise<void>;
           try {
             const rawMessage = (command.message as string) ?? "";
+            const skills = this.inner.resourceLoader?.getSkills?.()?.skills ?? [];
             const expandedMessage = expandInlineSkills(
               rawMessage,
-              this.inner.resourceLoader.getSkills().skills,
+              skills,
             );
             prompt = this.inner.prompt(expandedMessage, {
               ...(promptImages?.length ? { images: promptImages } : {}),
@@ -895,9 +896,10 @@ export class AgentSessionWrapper {
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const rawMessage = (command.message as string) ?? "";
+        const skills = this.inner.resourceLoader?.getSkills?.()?.skills ?? [];
         const expandedMessage = expandInlineSkills(
           rawMessage,
-          this.inner.resourceLoader.getSkills().skills,
+          skills,
         );
         await this.inner.steer(expandedMessage, steerImages?.length ? steerImages : undefined);
         return null;
@@ -906,9 +908,10 @@ export class AgentSessionWrapper {
       case "follow_up": {
         const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const rawMessage = (command.message as string) ?? "";
+        const skills = this.inner.resourceLoader?.getSkills?.()?.skills ?? [];
         const expandedMessage = expandInlineSkills(
           rawMessage,
-          this.inner.resourceLoader.getSkills().skills,
+          skills,
         );
         await this.inner.followUp(expandedMessage, followImages?.length ? followImages : undefined);
         return null;
@@ -941,7 +944,7 @@ export class AgentSessionWrapper {
             sourceInfo: template.sourceInfo,
           });
         }
-        for (const skill of this.inner.resourceLoader.getSkills().skills) {
+        for (const skill of this.inner.resourceLoader?.getSkills?.()?.skills ?? []) {
           commands.push({
             name: `skill:${skill.name}`,
             description: skill.description,
