@@ -242,6 +242,10 @@ if (!$NoAutostart -and (Test-Path $ServicePs1)) {
         $proc = Start-Process -FilePath "schtasks.exe" -ArgumentList $createArgs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue
         if ($proc.ExitCode -eq 0) {
             Log-Message "  [OK] Scheduled Task created: $taskName (ONLOGON)"
+            if (Test-Path $startupLnk) {
+                Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
+                Log-Message "  [INFO] Cleaned up duplicate Startup shortcut to avoid port conflict."
+            }
         } else {
             try {
                 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArg
@@ -250,6 +254,10 @@ if (!$NoAutostart -and (Test-Path $ServicePs1)) {
                 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
                 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
                 Log-Message "  [OK] Scheduled Task created via PowerShell: $taskName"
+                if (Test-Path $startupLnk) {
+                    Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
+                    Log-Message "  [INFO] Cleaned up duplicate Startup shortcut to avoid port conflict."
+                }
             } catch {
                 Log-Message "  [WARN] Failed to create Scheduled Task: $($_.Exception.Message)"
             }

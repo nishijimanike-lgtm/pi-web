@@ -182,6 +182,12 @@ function Test-ServerHealth {
 }
 
 function Start-WebServer {
+    if (Test-ServerHealth) {
+        $script:ServerState = "Running"
+        Update-TrayMenu
+        Write-ServiceLog "Existing server is already active at $ServerUrl. Adopting monitoring."
+        return
+    }
     if ($script:ChildProcess -and !$script:ChildProcess.HasExited) { return }
     $script:ServerState = "Starting"
     Update-TrayMenu
@@ -452,11 +458,9 @@ $HealthTimer.Add_Tick({
         return
     }
 
-    if (!$script:ChildProcess -or $script:ChildProcess.HasExited) {
-        if ($script:ChildProcess -and $script:ChildProcess.HasExited) {
-            Write-ServiceLog "Child server process exited with code $($script:ChildProcess.ExitCode)."
-            $script:ChildProcess = $null
-        }
+    if ($script:ChildProcess -and $script:ChildProcess.HasExited) {
+        Write-ServiceLog "Child server process exited with code $($script:ChildProcess.ExitCode)."
+        $script:ChildProcess = $null
 
         if (!$EffectiveAutoRestart) {
             $script:ServerState = "Stopped"
@@ -470,7 +474,7 @@ $HealthTimer.Add_Tick({
         $script:CrashTimestamps = [System.Collections.Generic.List[datetime]]($script:CrashTimestamps | Where-Object { $_ -gt $cutoff })
 
         if ($script:CrashTimestamps.Count -ge 3) {
-            $script:ServerState = "Crashed"
+            $script:ServerState = "Error"
             Update-TrayMenu
             Write-ServiceLog "CRASH LOOP: Server crashed 3 times within 30 seconds. Disabling auto-restart."
             $Tray.ShowBalloonTip(5000, "Pi Web Service Alert", "Server crashed repeatedly. Please check logs.", [System.Windows.Forms.ToolTipIcon]::Error)
@@ -479,6 +483,15 @@ $HealthTimer.Add_Tick({
 
         Write-ServiceLog "Server process is down. Triggering auto-restart..."
         Start-WebServer
+        return
+    }
+
+    if (!$script:ChildProcess) {
+        # Do nothing if it's already in Error or Stopped state
+        if ($script:ServerState -ne "Error" -and $script:ServerState -ne "Stopped") {
+            $script:ServerState = "Stopped"
+            Update-TrayMenu
+        }
     } else {
         if ($script:ServerState -ne "Starting") {
             $script:ServerState = "Starting"
@@ -488,6 +501,16 @@ $HealthTimer.Add_Tick({
 })
 
 # Start Web Server & Begin Loop
-Start-WebServer
+if (Test-ServerHealth) {
+    $script:ServerState = "Running"
+    Update-TrayMenu
+    Write-ServiceLog "Existing server detected at $ServerUrl, adopting monitoring without spawning duplicate process."
+    if ($ShouldOpenBrowser -and !$script:InitialBrowserOpened) {
+        $script:InitialBrowserOpened = $true
+        Start-Process $ServerUrl
+    }
+} else {
+    Start-WebServer
+}
 $HealthTimer.Start()
 [System.Windows.Forms.Application]::Run()
