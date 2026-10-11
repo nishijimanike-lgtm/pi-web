@@ -60,3 +60,5 @@ e2e_*.mjs
 native/tray/bin/
 native/tray/obj/
 
+/runs
+
