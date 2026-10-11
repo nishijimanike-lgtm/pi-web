@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Windows.Forms;
@@ -96,6 +97,8 @@ class TrayApplication : IDisposable
     private Mutex? _appMutex;
     private bool _createdNew;
     private Process? _childProcess;
+    private int? _managedPid;
+    private IntPtr _jobHandle = IntPtr.Zero;
     private string _state = "Starting";
     private readonly List<DateTime> _crashTimestamps = new();
     private bool _isExiting;
@@ -315,14 +318,25 @@ class TrayApplication : IDisposable
         {
             WriteLog("Restart requested from tray.");
             StopWebServer();
-            Thread.Sleep(500);
+
+            // Never spawn into a port that is still bound: that is what turned a
+            // restart into an EADDRINUSE crash loop.
+            if (!WaitForPortFree(8000))
+            {
+                var owner = FindPortOwnerPid();
+                _state = "Error";
+                UpdateTrayUI();
+                WriteLog($"Restart aborted: port {_effectivePort} is still in use{(owner.HasValue ? $" (PID {owner.Value})" : "")}.");
+                ShowBalloon("Pi Web", $"Port {_effectivePort} could not be released. Restart aborted - see logs.", ToolTipIcon.Error);
+                return;
+            }
             StartWebServer();
         });
         _contextMenu.Items.Add(_menuRestart);
 
         _menuToggle = new ToolStripMenuItem("Stop Server", null, (s, e) =>
         {
-            if (_state == "Running" || _state == "Starting") StopWebServer();
+            if (ServerIsUp()) StopWebServer();
             else StartWebServer();
         });
         _contextMenu.Items.Add(_menuToggle);
@@ -418,6 +432,12 @@ class TrayApplication : IDisposable
                 if (_state != "Running")
                 {
                     _state = "Running";
+                    if (_childProcess == null && !_managedPid.HasValue)
+                    {
+                        _managedPid = FindPortOwnerPid();
+                        if (_managedPid.HasValue) WriteLog($"Tracking externally started server PID {_managedPid}.");
+                    }
+                    _crashTimestamps.Clear();
                     WriteLog($"Server is healthy and responsive at {_serverUrl}");
                     UpdateTrayUI();
                     if (_openBrowser)
@@ -440,9 +460,7 @@ class TrayApplication : IDisposable
         // If server is already running on port, adopt it
         if (TestServerHealth())
         {
-            _state = "Running";
-            WriteLog($"Detected existing active server on {_serverUrl}. Adopting instance.");
-            UpdateTrayUI();
+            AdoptRunningServer($"Detected existing active server on {_serverUrl}. Adopting instance.");
             try
             {
                 _notifyIcon.ShowBalloonTip(2000, "Pi Web Tray", $"Service is online: {_serverUrl}", ToolTipIcon.Info);
@@ -479,17 +497,46 @@ class TrayApplication : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether a Pi Web server is currently up, however it was started. The menu
+    /// must offer "Stop Server" whenever this is true - keying it off the child
+    /// handle alone hid the stop option for every adopted server.
+    /// </summary>
+    private bool ServerIsUp()
+    {
+        if (_childProcess != null && !_childProcess.HasExited) return true;
+        return _state == "Running" || _state == "Starting";
+    }
+
+    private void ShowBalloon(string title, string message, ToolTipIcon icon)
+    {
+        if (_notifyIcon == null) return;
+        try { _notifyIcon.ShowBalloonTip(3000, title, message, icon); } catch { }
+    }
+
+    /// <summary>Adopt a server this tray did not spawn, and remember its PID so Stop can reach it.</summary>
+    private void AdoptRunningServer(string reason)
+    {
+        _managedPid = FindPortOwnerPid();
+        _state = "Running";
+        WriteLog(reason + (_managedPid.HasValue ? $" Tracking PID {_managedPid}." : " Could not resolve the owning PID."));
+        UpdateTrayUI();
+    }
+
     private void UpdateTrayUI()
     {
+        if (_notifyIcon == null) return;
+
         var text = $"Pi Web ({_state})";
         if (text.Length > 63) text = text.Substring(0, 63);
         _notifyIcon.Text = text;
 
+        var pidSuffix = _managedPid.HasValue ? $", PID {_managedPid}" : "";
         _menuStatus.Text = _state == "Running"
-            ? $"  Status: Running ({_effectivePort})"
-            : (_state == "Starting" ? "  Status: Starting..." : "  Status: Stopped");
+            ? $"  Status: Running ({_effectivePort}{pidSuffix})"
+            : (_state == "Starting" ? $"  Status: Starting ({_effectivePort})" : "  Status: Stopped");
 
-        _menuToggle.Text = (_childProcess != null && !_childProcess.HasExited) ? "Stop Server" : "Start Server";
+        _menuToggle.Text = ServerIsUp() ? "Stop Server" : "Start Server";
         _menuOpen.Enabled = (_state == "Running");
     }
 
@@ -538,6 +585,25 @@ class TrayApplication : IDisposable
     private void StartWebServer()
     {
         if (_childProcess != null && !_childProcess.HasExited) return;
+
+        // Never spawn a duplicate onto a bound port.
+        if (TestServerHealth())
+        {
+            AdoptRunningServer($"Server already answering at {_serverUrl}. Adopting instead of spawning a duplicate.");
+            return;
+        }
+
+        var portOwner = FindPortOwnerPid();
+        if (portOwner.HasValue)
+        {
+            var image = GetProcessImageName(portOwner.Value) ?? "unknown";
+            _state = "Error";
+            UpdateTrayUI();
+            WriteLog($"Refusing to start: port {_effectivePort} is held by PID {portOwner.Value} ({image}) but is not responding. Use Restart Server to force-stop it.");
+            ShowBalloon("Pi Web", $"Port {_effectivePort} is held by {image} (PID {portOwner.Value}). Use Restart Server to force-stop it.", ToolTipIcon.Error);
+            return;
+        }
+
         _state = "Starting";
         UpdateTrayUI();
         WriteLog($"Starting web server in {_effectiveMode} mode on {_effectiveHostname}:{_effectivePort}...");
@@ -581,6 +647,8 @@ class TrayApplication : IDisposable
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
                 _childProcess = proc;
+                _managedPid = proc.Id;
+                AssignToKillOnCloseJob(proc);
                 WriteLog($"Child server process started with PID {proc.Id}");
             }
             else
@@ -600,11 +668,66 @@ class TrayApplication : IDisposable
 
     private void StopWebServer()
     {
-        if (_childProcess == null) return;
+        // Resolve the server by who owns the port, not only by the handle we
+        // spawned. A server started outside this tray (or adopted after a tray
+        // restart) has no child handle, and skipping it here is exactly what made
+        // "Restart Server" collide with the still-listening process.
+        int? pid = null;
+        if (_childProcess != null && !_childProcess.HasExited) pid = _childProcess.Id;
+        else if (_managedPid.HasValue && IsProcessAlive(_managedPid.Value)) pid = _managedPid;
+        pid ??= FindPortOwnerPid();
+
+        if (pid == null)
+        {
+            WriteLog("Stop requested, but no server process was found.");
+        }
+        else if (pid.Value == Environment.ProcessId)
+        {
+            WriteLog("Refusing to stop: the port owner is this tray process itself.");
+        }
+        else if (!IsLikelyPiWebServer(pid.Value))
+        {
+            var image = GetProcessImageName(pid.Value) ?? "unknown";
+            WriteLog($"Refusing to stop PID {pid.Value} ({image}): it does not look like a Pi Web server.");
+            ShowBalloon("Pi Web", $"Port {_effectivePort} is held by {image} (PID {pid.Value}), not a Pi Web server. Not stopped.", ToolTipIcon.Warning);
+        }
+        else
+        {
+            KillProcessTree(pid.Value);
+        }
+
+        try { _childProcess?.Dispose(); } catch { }
+        _childProcess = null;
+        _managedPid = null;
+        _state = WaitForPortFree(4000) ? "Stopped" : "Running";
+        UpdateTrayUI();
+        WriteLog(_state == "Stopped" ? "Server stopped." : $"Server is still listening on port {_effectivePort} after the stop request.");
+    }
+
+    private static bool IsProcessAlive(int pid)
+    {
+        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
+        catch { return false; }
+    }
+
+    private static string? GetProcessImageName(int pid)
+    {
+        try { using var p = Process.GetProcessById(pid); return p.ProcessName; }
+        catch { return null; }
+    }
+
+    private static bool IsLikelyPiWebServer(int pid)
+    {
+        var name = GetProcessImageName(pid)?.ToLowerInvariant();
+        if (string.IsNullOrEmpty(name)) return false;
+        return name.Contains("node") || name.Contains("pi-web") || name.Contains("bun") || name.Contains("deno");
+    }
+
+    private void KillProcessTree(int pid)
+    {
         try
         {
-            WriteLog($"Stopping child server process (PID {_childProcess.Id})...");
-            var pid = _childProcess.Id;
+            WriteLog($"Stopping server process (PID {pid}) and its children...");
             var killPsi = new ProcessStartInfo
             {
                 FileName = Path.Combine(Environment.SystemDirectory, "taskkill.exe"),
@@ -613,19 +736,131 @@ class TrayApplication : IDisposable
                 UseShellExecute = false
             };
             using var killProc = Process.Start(killPsi);
-            killProc?.WaitForExit(3000);
+            killProc?.WaitForExit(5000);
         }
         catch (Exception ex)
         {
-            WriteLog($"Error stopping child server: {ex.Message}");
+            WriteLog($"Error stopping server PID {pid}: {ex.Message}");
         }
-        finally
+    }
+
+    /// <summary>True once nothing is listening on the configured port any more.</summary>
+    private bool WaitForPortFree(int timeoutMs)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (true)
         {
-            try { _childProcess.Dispose(); } catch { }
-            _childProcess = null;
-            _state = "Stopped";
-            UpdateTrayUI();
-            WriteLog("Child server stopped.");
+            if (FindPortOwnerPid() == null) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            Thread.Sleep(400);
+        }
+    }
+
+    /// <summary>PID listening on the configured port, or null when the port is free.</summary>
+    private int? FindPortOwnerPid()
+    {
+        return FindPortOwnerPidViaNetstat() ?? FindPortOwnerPidViaPowerShell();
+    }
+
+    private int? FindPortOwnerPidViaNetstat()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.SystemDirectory, "netstat.exe"),
+                Arguments = "-ano -p TCP",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return null;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(3000);
+
+            foreach (var rawLine in output.Split('\n'))
+            {
+                var parts = rawLine.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5) continue;
+                if (!parts[0].Equals("TCP", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!parts[3].Equals("LISTENING", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var local = parts[1];
+                var separator = local.LastIndexOf(':');
+                if (separator < 0) continue;
+                if (!int.TryParse(local.Substring(separator + 1), out var port) || port != _effectivePort) continue;
+
+                if (int.TryParse(parts[4], out var ownerPid) && ownerPid > 0 && ownerPid != Environment.ProcessId)
+                    return ownerPid;
+            }
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"netstat port lookup failed: {ex.Message}");
+        }
+        return null;
+    }
+
+    private int? FindPortOwnerPidViaPowerShell()
+    {
+        try
+        {
+            var script = $"@(Get-NetTCPConnection -State Listen -LocalPort {_effectivePort} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique) -join ','";
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi);
+            if (p == null) return null;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+
+            foreach (var token in output.Split(new[] { ',', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(token.Trim(), out var ownerPid) && ownerPid > 0 && ownerPid != Environment.ProcessId)
+                    return ownerPid;
+            }
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"PowerShell port lookup failed: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Bind the spawned server to a kill-on-close job object so it dies with the
+    /// tray even when the tray is force-killed. That was how the orphaned server
+    /// holding the port - and therefore the adopted state - appeared at all.
+    /// </summary>
+    private void AssignToKillOnCloseJob(Process proc)
+    {
+        try
+        {
+            if (_jobHandle == IntPtr.Zero)
+            {
+                _jobHandle = JobObject.CreateKillOnClose();
+                if (_jobHandle == IntPtr.Zero)
+                {
+                    WriteLog("Kill-on-close job object unavailable; the server may outlive the tray if the tray is force-killed.");
+                    return;
+                }
+            }
+
+            if (JobObject.AssignProcess(_jobHandle, proc.Handle))
+                WriteLog($"Server PID {proc.Id} bound to kill-on-close job object.");
+            else
+                WriteLog($"Could not bind server PID {proc.Id} to the job object (Win32 error {Marshal.GetLastWin32Error()}).");
+        }
+        catch (Exception ex)
+        {
+            WriteLog($"Job object setup failed: {ex.Message}");
         }
     }
 
@@ -691,4 +926,90 @@ class TrayApplication : IDisposable
         _appMutex?.Dispose();
         _childProcess?.Dispose();
     }
+}
+
+/// <summary>Minimal wrapper around a Windows job object with KILL_ON_JOB_CLOSE.</summary>
+internal static class JobObject
+{
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedLimitInformation
+    {
+        public BasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string? lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr hJob, int jobObjectInformationClass, IntPtr lpJobObjectInformation, uint cbJobObjectInformationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    /// <summary>Creates the job, or returns <see cref="IntPtr.Zero"/> when unavailable.</summary>
+    public static IntPtr CreateKillOnClose()
+    {
+        var job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
+
+        var info = new ExtendedLimitInformation();
+        info.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+
+        var size = Marshal.SizeOf<ExtendedLimitInformation>();
+        var buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(info, buffer, false);
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, buffer, (uint)size))
+            {
+                CloseHandle(job);
+                return IntPtr.Zero;
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+
+        return job;
+    }
+
+    public static bool AssignProcess(IntPtr job, IntPtr process)
+        => AssignProcessToJobObject(job, process);
 }

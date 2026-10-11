@@ -148,6 +148,7 @@ Write-ServiceLog "=========================================="
 # 4. Process State & Node Resolution
 # -----------------------------------------------------------------------------
 $script:ChildProcess = $null
+$script:ManagedPid = $null
 $script:ServerState = "Starting"
 $script:CrashTimestamps = [System.Collections.Generic.List[datetime]]::new()
 $script:IsExiting = $false
@@ -181,14 +182,58 @@ function Test-ServerHealth {
     }
 }
 
+# The server is identified by who owns the listening port, not only by the child
+# handle we spawned. An adopted server has no child handle, and treating "no
+# handle" as "no server" is what hid the stop option and made restart collide.
+function Get-PortOwnerPid {
+    try {
+        $conns = Get-NetTCPConnection -State Listen -LocalPort $EffectivePort -ErrorAction SilentlyContinue
+        if ($conns) {
+            $owners = @($conns | Select-Object -ExpandProperty OwningProcess -Unique |
+                Where-Object { $_ -and $_ -gt 0 -and $_ -ne $PID })
+            if ($owners.Count -gt 0) { return [int]$owners[0] }
+        }
+    } catch { }
+    return $null
+}
+
+function Test-PiWebProcess {
+    param([int]$TargetPid)
+    if ($TargetPid -le 0 -or $TargetPid -eq $PID) { return $false }
+    $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue
+    if (!$proc) { return $false }
+    $name = $proc.ProcessName.ToLowerInvariant()
+    return ($name -like "*node*" -or $name -like "*pi-web*" -or $name -like "*bun*" -or $name -like "*deno*")
+}
+
+function Wait-ForPortFree {
+    param([int]$TimeoutMs = 8000)
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ($true) {
+        if (!(Get-PortOwnerPid)) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 400
+    }
+}
+
 function Start-WebServer {
     if (Test-ServerHealth) {
+        $script:ManagedPid = Get-PortOwnerPid
         $script:ServerState = "Running"
         Update-TrayMenu
-        Write-ServiceLog "Existing server is already active at $ServerUrl. Adopting monitoring."
+        Write-ServiceLog "Existing server is already active at $ServerUrl. Adopting monitoring (PID $($script:ManagedPid))."
         return
     }
     if ($script:ChildProcess -and !$script:ChildProcess.HasExited) { return }
+
+    $portOwner = Get-PortOwnerPid
+    if ($portOwner) {
+        $script:ServerState = "Error"
+        Update-TrayMenu
+        Write-ServiceLog "Refusing to start: port $EffectivePort is held by PID $portOwner but is not responding. Use Restart Service to force-stop it."
+        return
+    }
+
     $script:ServerState = "Starting"
     Update-TrayMenu
     Write-ServiceLog "Starting web server in $EffectiveMode mode on ${EffectiveHostname}:${EffectivePort}..."
@@ -230,6 +275,7 @@ function Start-WebServer {
             $proc.BeginOutputReadLine()
             $proc.BeginErrorReadLine()
             $script:ChildProcess = $proc
+            $script:ManagedPid = $proc.Id
             Write-ServiceLog "Child server process started with PID $($proc.Id)"
         } else {
             $script:ServerState = "Error"
@@ -244,25 +290,64 @@ function Start-WebServer {
 }
 
 function Stop-WebServer {
-    if (!$script:ChildProcess) { return }
-    try {
-        Write-ServiceLog "Stopping child server process (PID $($script:ChildProcess.Id))..."
-        $taskkillExe = Join-Path $env:SystemRoot "System32\taskkill.exe"
-        if (!(Test-Path $taskkillExe)) { $taskkillExe = "taskkill.exe" }
-        Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($script:ChildProcess.Id) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
-    } catch {
-        Write-ServiceLog "Error killing child process: $($_.Exception.Message)"
-    } finally {
-        $script:ChildProcess = $null
-        $script:ServerState = "Stopped"
-        Update-TrayMenu
-        Write-ServiceLog "Child server stopped."
+    $targetPid = $null
+    if ($script:ChildProcess -and !$script:ChildProcess.HasExited) {
+        $targetPid = $script:ChildProcess.Id
+    } elseif ($script:ManagedPid -and (Get-Process -Id $script:ManagedPid -ErrorAction SilentlyContinue)) {
+        $targetPid = $script:ManagedPid
+    } else {
+        $targetPid = Get-PortOwnerPid
     }
+
+    if (!$targetPid) {
+        Write-ServiceLog "Stop requested, but no server process was found."
+    } elseif (!(Test-PiWebProcess -TargetPid $targetPid)) {
+        $image = "unknown"
+        $ownerProc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
+        if ($ownerProc) { $image = $ownerProc.ProcessName }
+        Write-ServiceLog "Refusing to stop PID $targetPid ($image): it does not look like a Pi Web server."
+    } else {
+        try {
+            Write-ServiceLog "Stopping server process (PID $targetPid) and its children..."
+            $taskkillExe = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            if (!(Test-Path $taskkillExe)) { $taskkillExe = "taskkill.exe" }
+            Start-Process -FilePath $taskkillExe -ArgumentList "/PID $targetPid /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
+        } catch {
+            Write-ServiceLog "Error killing server process: $($_.Exception.Message)"
+        }
+    }
+
+    $script:ChildProcess = $null
+    $script:ManagedPid = $null
+    if (Wait-ForPortFree -TimeoutMs 4000) {
+        $script:ServerState = "Stopped"
+        Write-ServiceLog "Server stopped."
+    } else {
+        $script:ServerState = "Running"
+        Write-ServiceLog "Server is still listening on port $EffectivePort after the stop request."
+    }
+    Update-TrayMenu
 }
 
 function Restart-WebServer {
-    Write-ServiceLog "Restarting web server..."
+    Write-ServiceLog "Restart requested from tray."
     Stop-WebServer
+
+    # Never spawn into a port that is still bound: that is what turned a restart
+    # into an EADDRINUSE crash loop.
+    if (!(Wait-ForPortFree -TimeoutMs 8000)) {
+        $owner = Get-PortOwnerPid
+        $ownerText = ""
+        if ($owner) { $ownerText = " (PID $owner)" }
+        $script:ServerState = "Error"
+        Update-TrayMenu
+        Write-ServiceLog "Restart aborted: port $EffectivePort is still in use$ownerText."
+        if ($Tray) {
+            $Tray.ShowBalloonTip(3000, "Pi Web", "Port $EffectivePort could not be released. Restart aborted - see logs.", [System.Windows.Forms.ToolTipIcon]::Error)
+        }
+        return
+    }
+
     Start-WebServer
 }
 
@@ -334,7 +419,7 @@ $Menu.Items.Add($MenuRestart) | Out-Null
 $MenuToggle = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuToggle.Text = "⏸ Stop Service"
 $MenuToggle.Add_Click({
-    if ($script:ChildProcess -and !$script:ChildProcess.HasExited) {
+    if ($script:ServerState -eq "Running" -or $script:ServerState -eq "Starting" -or ($script:ChildProcess -and !$script:ChildProcess.HasExited)) {
         Stop-WebServer
     } else {
         Start-WebServer
@@ -447,6 +532,11 @@ $HealthTimer.Add_Tick({
     if ($isHealthy) {
         if ($script:ServerState -ne "Running") {
             $script:ServerState = "Running"
+            if (!$script:ChildProcess -and !$script:ManagedPid) {
+                $script:ManagedPid = Get-PortOwnerPid
+                Write-ServiceLog "Tracking externally started server PID $($script:ManagedPid)."
+            }
+            $script:CrashTimestamps.Clear()
             Write-ServiceLog "Server is responsive at $ServerUrl"
             Update-TrayMenu
 
