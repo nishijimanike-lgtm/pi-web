@@ -12,6 +12,14 @@ pub fn run() {
     let process_mgr_exit = Arc::clone(&process_mgr);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // When a secondary instance is launched, focus the existing main window
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .manage(process_mgr)
         .setup(move |app| {
             if cfg!(debug_assertions) {
