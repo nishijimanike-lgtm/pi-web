@@ -61,4 +61,4 @@ native/tray/bin/
 native/tray/obj/
 
 /runs
-
+src-tauri/target/
