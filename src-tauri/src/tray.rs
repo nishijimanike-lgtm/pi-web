@@ -13,10 +13,10 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let menu = Menu::with_items(app, &[&show_i, &browser_i, &restart_i, &sep, &quit_i])?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| "Default window icon not found")?;
+    // Light purple tray icon
+    let icon_bytes = include_bytes!("../icons/tray-32x32.png");
+    let icon = tauri::image::Image::from_bytes(icon_bytes)
+        .unwrap_or_else(|_| app.default_window_icon().cloned().expect("Default icon not found"));
 
     let _tray = TrayIconBuilder::new()
         .menu(&menu)
