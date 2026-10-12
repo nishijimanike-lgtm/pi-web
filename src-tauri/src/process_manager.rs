@@ -1,3 +1,4 @@
+use std::fs;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -6,6 +7,54 @@ use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::io::AsRawHandle;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+fn default_port() -> u16 {
+    30141
+}
+fn default_hostname() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_mode() -> String {
+    "start".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_false() -> bool {
+    false
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebServiceConfig {
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default = "default_hostname")]
+    pub hostname: String,
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    #[serde(default = "default_true")]
+    pub autostart: bool,
+    #[serde(default = "default_false")]
+    pub open_browser_on_launch: bool,
+    #[serde(default = "default_true")]
+    pub auto_restart: bool,
+}
+
+impl Default for WebServiceConfig {
+    fn default() -> Self {
+        Self {
+            port: default_port(),
+            hostname: default_hostname(),
+            mode: default_mode(),
+            autostart: default_true(),
+            open_browser_on_launch: default_false(),
+            auto_restart: default_true(),
+        }
+    }
+}
 
 pub struct ProcessManager {
     child: Mutex<Option<Child>>,
@@ -22,9 +71,50 @@ impl ProcessManager {
         }
     }
 
+    pub fn get_agent_dir(&self) -> PathBuf {
+        if let Some(user_home) = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+        {
+            PathBuf::from(user_home).join(".pi").join("agent")
+        } else {
+            PathBuf::from(".").join(".pi").join("agent")
+        }
+    }
+
+    pub fn get_config_path(&self) -> PathBuf {
+        self.get_agent_dir().join("web-service.json")
+    }
+
+    pub fn get_log_path(&self) -> PathBuf {
+        self.get_agent_dir().join("logs").join("pi-web-service.log")
+    }
+
+    pub fn load_config(&self) -> WebServiceConfig {
+        let config_file = self.get_config_path();
+        if config_file.exists() {
+            if let Ok(content) = fs::read_to_string(&config_file) {
+                if let Ok(config) = serde_json::from_str::<WebServiceConfig>(&content) {
+                    return config;
+                }
+            }
+        }
+        WebServiceConfig::default()
+    }
+
     pub fn is_port_listening(&self, port: u16) -> bool {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+    }
+
+    pub fn wait_for_port_free(&self, port: u16, max_duration: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < max_duration {
+            if !self.is_port_listening(port) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        !self.is_port_listening(port)
     }
 
     pub fn find_project_root(&self) -> PathBuf {
@@ -54,7 +144,10 @@ impl ProcessManager {
         PathBuf::from(".")
     }
 
-    pub fn ensure_server_running(&self, port: u16) -> Result<(), String> {
+    pub fn ensure_server_running(&self) -> Result<(), String> {
+        let config = self.load_config();
+        let port = config.port;
+
         if self.is_port_listening(port) {
             log::info!("Port {} is already listening; using existing server.", port);
             return Ok(());
@@ -64,19 +157,57 @@ impl ProcessManager {
         let root = self.find_project_root();
         log::info!("Using project root: {:?}", root);
 
+        let mut mode = config.mode.clone();
+        if mode == "start" && !root.join(".next").exists() {
+            log::info!(".next directory not found. Automatically falling back to dev mode.");
+            mode = "dev".to_string();
+        }
+
+        let npm_script = if mode == "start" { "start" } else { "dev" };
+
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
-            c.args(["/c", "npm", "run", "dev"]);
+            c.args(["/c", "npm", "run", npm_script]);
             c
         } else {
             let mut c = Command::new("npm");
-            c.args(["run", "dev"]);
+            c.args(["run", npm_script]);
             c
         };
 
         cmd.current_dir(&root);
         cmd.env("PORT", port.to_string());
-        cmd.env("PI_WEB_HOSTNAME", "127.0.0.1");
+        let bind_host = if config.hostname.is_empty() { "127.0.0.1" } else { &config.hostname };
+        cmd.env("PI_WEB_HOSTNAME", bind_host);
+
+        // Redirect stdio to prevent any console window popup and keep log intact
+        let log_path = self.get_log_path();
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let stdout_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .ok();
+        let stderr_file = stdout_file.as_ref().and_then(|f| f.try_clone().ok());
+
+        cmd.stdin(std::process::Stdio::null());
+        if let Some(f) = stdout_file {
+            cmd.stdout(f);
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+        }
+        if let Some(f) = stderr_file {
+            cmd.stderr(f);
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
 
         // Spawn child
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn Node server: {}", e))?;
@@ -99,7 +230,7 @@ impl ProcessManager {
         for _ in 0..60 {
             std::thread::sleep(Duration::from_millis(500));
             if self.is_port_listening(port) {
-                log::info!("Node.js server is ready at http://127.0.0.1:{}", port);
+                log::info!("Node.js server is ready at http://{}:{}", bind_host, port);
                 return Ok(());
             }
         }
@@ -114,6 +245,20 @@ impl ProcessManager {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    pub fn restart_managed_server(&self) -> Result<(), String> {
+        let config = self.load_config();
+        let port = config.port;
+
+        self.stop_managed_server();
+
+        // Wait up to 6 seconds for port to free up
+        if !self.wait_for_port_free(port, Duration::from_secs(6)) {
+            return Err(format!("Port {} could not be released in time.", port));
+        }
+
+        self.ensure_server_running()
     }
 }
 

@@ -11,6 +11,10 @@ pub fn run() {
     let process_mgr_setup = Arc::clone(&process_mgr);
     let process_mgr_exit = Arc::clone(&process_mgr);
 
+    let is_tray_mode = std::env::args().any(|arg| {
+        arg == "--tray" || arg == "--minimized" || arg == "-s" || arg == "--silent"
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // When a secondary instance is launched, focus the existing main window
@@ -30,14 +34,43 @@ pub fn run() {
                 );
             }
 
-            // Ensure server is running in background thread so startup stays responsive
             let handle = app.handle().clone();
             let pm = Arc::clone(&process_mgr_setup);
+            let config = pm.load_config();
+            let host = if config.hostname.is_empty() { "127.0.0.1" } else { &config.hostname };
+            let server_url = format!("http://{}:{}", host, config.port);
+            let open_browser_on_launch = config.open_browser_on_launch;
+
+            // Handle initial window visibility based on CLI arguments
+            if let Some(main_win) = app.get_webview_window("main") {
+                if is_tray_mode {
+                    log::info!("Started with --tray; hiding main window to system tray.");
+                    let _ = main_win.hide();
+                } else {
+                    let _ = main_win.show();
+                    let _ = main_win.unminimize();
+                    let _ = main_win.set_focus();
+                }
+            }
+
+            // Ensure server is running in background thread so startup stays responsive
+            let target_url = server_url.clone();
             std::thread::spawn(move || {
-                if let Err(e) = pm.ensure_server_running(30141) {
+                if let Err(e) = pm.ensure_server_running() {
                     log::error!("Failed to ensure server is running: {}", e);
-                } else if let Some(win) = handle.get_webview_window("main") {
-                    let _ = win.eval("if (!window.location.href.includes('30141')) { window.location.href = 'http://127.0.0.1:30141'; }");
+                } else {
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let eval_code = format!(
+                            "if (!window.location.href.includes('{}')) {{ window.location.href = '{}'; }}",
+                            pm.load_config().port,
+                            target_url
+                        );
+                        let _ = win.eval(&eval_code);
+                    }
+
+                    if open_browser_on_launch {
+                        let _ = open::that(target_url);
+                    }
                 }
             });
 

@@ -257,7 +257,7 @@ export async function isTrayProcessRunning(): Promise<boolean> {
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        '$native = Get-Process -Name "pi-web-tray" -ErrorAction SilentlyContinue; if ($native) { ($native | Measure-Object).Count } else { $scripts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*pi-web-tray.ps1*" -or $_.CommandLine -like "*pi-web-service.ps1*" }; ($scripts | Measure-Object).Count }',
+        '$native = Get-Process -Name "pi-web" -ErrorAction SilentlyContinue; if (!$native) { $native = Get-Process -Name "pi-web-tray" -ErrorAction SilentlyContinue }; if ($native) { ($native | Measure-Object).Count } else { $scripts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*pi-web-tray.ps1*" -or $_.CommandLine -like "*pi-web-service.ps1*" }; ($scripts | Measure-Object).Count }',
       ],
       { timeout: 4000, env: getWindowsExecutionEnv(), windowsHide: true }
     );
@@ -422,6 +422,21 @@ export async function uninstallTrayShortcuts(
   }
 }
 
+export function findTrayExecutable(repoRoot: string): string | null {
+  const candidates = [
+    path.join(repoRoot, "src-tauri", "target", "release", "pi-web.exe"),
+    path.join(repoRoot, "bin", "pi-web.exe"),
+    path.join(repoRoot, "src-tauri", "target", "debug", "pi-web.exe"),
+    path.join(repoRoot, "bin", "pi-web-tray.exe"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) {
+      return c;
+    }
+  }
+  return null;
+}
+
 export async function toggleAutostart(enable: boolean): Promise<{ success: boolean; autostart: boolean; message?: string }> {
   if (process.platform !== "win32") {
     return { success: false, autostart: false, message: "Autostart is only supported on Windows." };
@@ -429,8 +444,9 @@ export async function toggleAutostart(enable: boolean): Promise<{ success: boole
 
   await saveWebServiceConfig({ autostart: enable });
   const repoRoot = getRepoRoot();
-  const nativeExe = path.join(repoRoot, "bin", "pi-web-tray.exe");
-  const useNative = existsSync(nativeExe);
+  const nativeExe = findTrayExecutable(repoRoot);
+  const useNative = !!nativeExe;
+  const isTauri = nativeExe && path.basename(nativeExe).toLowerCase() === "pi-web.exe";
   const launchVbs = path.join(repoRoot, "scripts", "windows", "launch-tray.vbs");
   const icoPath = path.join(repoRoot, "public", "icons", "pi-web.ico");
   const { startup: startupLnk } = getWindowsShortcutPaths();
@@ -438,11 +454,12 @@ export async function toggleAutostart(enable: boolean): Promise<{ success: boole
   try {
     if (enable) {
       const wscriptExe = resolveWscriptBin();
+      const targetArgs = isTauri ? "--tray" : "-Startup";
       const psCommand = useNative ? `
         $wsh = New-Object -ComObject WScript.Shell
         $sc = $wsh.CreateShortcut('${startupLnk.replace(/'/g, "''")}')
         $sc.TargetPath = '${nativeExe.replace(/'/g, "''")}'
-        $sc.Arguments = '-Startup'
+        $sc.Arguments = '${targetArgs}'
         $sc.WorkingDirectory = '${repoRoot.replace(/'/g, "''")}'
         if (Test-Path '${icoPath.replace(/'/g, "''")}') { $sc.IconLocation = '${icoPath.replace(/'/g, "''")},0' }
         $sc.Description = 'pi-web Background Tray Service'
@@ -483,25 +500,23 @@ export async function startTrayService(options: { openBrowser?: boolean } = {}):
   }
 
   const repoRoot = getRepoRoot();
-  const nativeExe = path.join(repoRoot, "bin", "pi-web-tray.exe");
+  const nativeExe = findTrayExecutable(repoRoot);
 
-  if (existsSync(nativeExe)) {
+  if (nativeExe) {
     try {
-      const args: string[] = [];
-      if (options.openBrowser) args.push("-OpenBrowser");
-      // Must use UseShellExecute (shell:true) so the WinExe gets a proper
-      // Desktop Window Manager session for NotifyIcon registration.
-      // 'windowsHide: true' would pass SW_HIDE and suppress tray icon — never use it here.
+      const isTauri = path.basename(nativeExe).toLowerCase() === "pi-web.exe";
+      const args: string[] = isTauri ? ["--tray"] : [];
+      if (options.openBrowser && !isTauri) args.push("-OpenBrowser");
+
       const child = spawn(nativeExe, args, {
         cwd: repoRoot,
         detached: true,
         stdio: "ignore",
         shell: false,
-        // No windowsHide — WinForms needs the default CreateProcess window flags
       });
       child.unref();
       invalidateTrayRunningCache();
-      return { success: true, message: "Native tray application started." };
+      return { success: true, message: `Native tray application started (${path.basename(nativeExe)}).` };
     } catch (e: unknown) {
       const err = e as Error;
       return { success: false, message: `Failed to launch native tray: ${err.message}` };
@@ -547,11 +562,11 @@ export async function stopTrayService(): Promise<{ success: boolean; message?: s
     } catch { }
     const taskkillExe = resolveTaskkillBin();
     const psCommand = `
-      $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%' OR Name LIKE '%pi-web-tray%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*pi-web-tray.ps1*' -or $_.CommandLine -like '*pi-web-service.ps1*' -or $_.CommandLine -like '*pi-web-tray.exe*') }
+      $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%' OR Name LIKE '%pi-web-tray%' OR Name LIKE '%pi-web%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*pi-web-tray.ps1*' -or $_.CommandLine -like '*pi-web-service.ps1*' -or $_.CommandLine -like '*pi-web-tray.exe*' -or $_.CommandLine -like '*pi-web.exe*') }
       foreach ($p in $trayProcs) {
           Start-Process -FilePath '${taskkillExe.replace(/'/g, "''")}' -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
       }
-      $nativeProcs = Get-CimInstance Win32_Process -Filter "Name = 'pi-web-tray.exe'" -ErrorAction SilentlyContinue
+      $nativeProcs = Get-CimInstance Win32_Process -Filter "Name = 'pi-web.exe' OR Name = 'pi-web-tray.exe'" -ErrorAction SilentlyContinue
       foreach ($p in $nativeProcs) {
           Start-Process -FilePath '${taskkillExe.replace(/'/g, "''")}' -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
       }

@@ -39,7 +39,7 @@
     "start:lan": "next start -H 0.0.0.0 -p 30141",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build --bundles nsis",
-    "tray:build": "dotnet publish native/tray/tray.csproj -c Release -r win-x64 --self-contained false -o bin",
+    "tray:build": "cargo build --manifest-path src-tauri/Cargo.toml --release",
     "tray:install": "node bin/pi-web-tray.js --install --start",
     "tray:uninstall": "node bin/pi-web-tray.js --uninstall",
     "tray:start": "node bin/pi-web-tray.js --start",
