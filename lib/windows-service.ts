@@ -15,6 +15,8 @@ export interface WebServiceConfig {
   autostart: boolean;
   openBrowserOnLaunch: boolean;
   autoRestart: boolean;
+  /** Absolute pi-web project path; empty falls back to cwd/exe detection. */
+  root: string;
 }
 
 export interface WebServiceStatus {
@@ -25,6 +27,7 @@ export interface WebServiceStatus {
   port: number;
   hostname: string;
   mode: "start" | "dev";
+  root: string;
   desktopShortcutExists: boolean;
   startMenuShortcutExists: boolean;
   startupShortcutExists: boolean;
@@ -41,6 +44,7 @@ export const DEFAULT_WEB_SERVICE_CONFIG: WebServiceConfig = {
   autostart: true,
   openBrowserOnLaunch: false,
   autoRestart: true,
+  root: "",
 };
 
 export function getRepoRoot(): string {
@@ -185,6 +189,7 @@ export async function loadWebServiceConfig(): Promise<WebServiceConfig> {
         autostart: typeof parsed.autostart === "boolean" ? parsed.autostart : DEFAULT_WEB_SERVICE_CONFIG.autostart,
         openBrowserOnLaunch: typeof parsed.openBrowserOnLaunch === "boolean" ? parsed.openBrowserOnLaunch : DEFAULT_WEB_SERVICE_CONFIG.openBrowserOnLaunch,
         autoRestart: typeof parsed.autoRestart === "boolean" ? parsed.autoRestart : DEFAULT_WEB_SERVICE_CONFIG.autoRestart,
+        root: typeof parsed.root === "string" ? parsed.root : DEFAULT_WEB_SERVICE_CONFIG.root,
       };
     } catch {
       // ignore invalid json and return default
@@ -314,6 +319,7 @@ export async function getWebServiceStatus(): Promise<WebServiceStatus> {
     port,
     hostname,
     mode: config.mode,
+    root: config.root,
     desktopShortcutExists: desktopExists,
     startMenuShortcutExists: startMenuExists,
     startupShortcutExists: startupExists,

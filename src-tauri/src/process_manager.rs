@@ -41,6 +41,11 @@ pub struct WebServiceConfig {
     pub open_browser_on_launch: bool,
     #[serde(default = "default_true")]
     pub auto_restart: bool,
+    /// Absolute path to the pi-web project. Empty means auto-detect from the
+    /// working directory or the executable's ancestors, which fails for an
+    /// installed build that lives outside the checkout.
+    #[serde(default)]
+    pub root: String,
 }
 
 impl Default for WebServiceConfig {
@@ -52,6 +57,7 @@ impl Default for WebServiceConfig {
             autostart: default_true(),
             open_browser_on_launch: default_false(),
             auto_restart: default_true(),
+            root: String::new(),
         }
     }
 }
@@ -118,6 +124,22 @@ impl ProcessManager {
     }
 
     pub fn find_project_root(&self) -> PathBuf {
+        // An explicitly configured root wins: an installed build has no
+        // package.json beside it, and its launcher's working directory is
+        // whatever the shortcut (or shell) happened to use.
+        let configured_root = self.load_config().root;
+        let configured_root = configured_root.trim();
+        if !configured_root.is_empty() {
+            let configured = PathBuf::from(configured_root);
+            if configured.join("package.json").exists() {
+                return configured;
+            }
+            log::warn!(
+                "Configured web-service root {:?} has no package.json; falling back to auto-detection.",
+                configured
+            );
+        }
+
         // Try current working directory first
         if let Ok(cwd) = std::env::current_dir() {
             if cwd.join("server.mjs").exists() || cwd.join("package.json").exists() {
