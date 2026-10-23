@@ -22,7 +22,8 @@
     "ios_saf 16.2"
   ],
   "bin": {
-    "pi-web": "bin/pi-web.js"
+    "pi-web": "bin/pi-web.js",
+    "pi-web-tray": "bin/pi-web-tray.js"
   },
   "files": [
     "bin",
@@ -41,6 +42,15 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30141",
     "start:lan": "next start -H 0.0.0.0 -p 30141",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build --bundles nsis",
+    "tray:build": "cargo build --manifest-path src-tauri/Cargo.toml --release",
+    "tray:install": "node bin/pi-web-tray.js --install --start",
+    "tray:uninstall": "node bin/pi-web-tray.js --uninstall",
+    "tray:start": "node bin/pi-web-tray.js --start",
+    "tray:stop": "node bin/pi-web-tray.js --stop",
+    "tray:restart": "node bin/pi-web-tray.js --restart",
+    "tray:status": "node bin/pi-web-tray.js --status",
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
@@ -69,6 +79,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
+    "@tauri-apps/cli": "^2.12.2",
     "@types/js-yaml": "^4.0.9",
     "@types/mdast": "^4.0.4",
     "@types/node": "^25",

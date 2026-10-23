@@ -1,0 +1,22 @@
+name: Sync Upstream Mirror
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天北京时间上午10点自动同步
+  workflow_dispatch:     # 支持手动点击触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: upstream-main
+          fetch-depth: 0
+
+      - name: Sync with Upstream
+        run: |
+          git remote add upstream https://github.com/agegr/pi-web.git
+          git fetch upstream
+          git reset --hard upstream/main
+          git push origin upstream-main --force

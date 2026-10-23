@@ -44,3 +44,14 @@ yarn-error.log*
 next-env.d.ts
 .factory
 e2e_*.mjs
+
+# native tray build artifacts
+/bin/pi-web-tray.exe
+/bin/pi-web-tray.pdb
+*.lnk
+
+# local dev logs and backups (restart-dev scripts)
+*.log
+.dsh-dev*
+.next.bak*
+/.next.bak*/
