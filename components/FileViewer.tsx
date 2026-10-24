@@ -17,6 +17,8 @@ import {
   isDocumentPreviewPath,
   isImagePath,
   isVideoPath,
+  isSpreadsheetPath,
+  isRtfPath,
 } from "@/lib/file-types";
 import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { fileVersion, fileVersionChanged } from "@/lib/file-version";
@@ -26,6 +28,8 @@ import { parseFrontmatter } from "@/lib/frontmatter";
 import { isExternalMarkdownHref, jumpToMarkdownFragment, markdownAppUrlTransform, markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
 import { CodeBlock, MermaidBlock } from "./MermaidBlock";
 import { DelimitedTable } from "./DelimitedTable";
+import { SpreadsheetViewer } from "./SpreadsheetViewer";
+import { RtfViewer } from "./RtfViewer";
 import { isDelimitedTablePath } from "@/lib/delimited-table";
 import { FrontmatterCard } from "./FrontmatterCard";
 import { diffGapLabel, parseUnifiedPatch, unifiedDiffLines, type SplitDiffGap, type UnifiedDiffLine } from "@/lib/patch";
@@ -1161,6 +1165,12 @@ export function FileViewer({
   }
   if (isDocumentPreviewPath(filePath)) {
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} initialPage={initialPage} watchEnabled={watchEnabled} />;
+  }
+  if (isSpreadsheetPath(filePath)) {
+    return <SpreadsheetViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} />;
+  }
+  if (isRtfPath(filePath)) {
+    return <RtfViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} />;
   }
   return (
     <TextFileViewer

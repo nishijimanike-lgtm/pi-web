@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type CSSProperties, type RefObject } from "react";
-import { measureColumnWidths, parseDelimitedTable, visibleRowRange } from "@/lib/delimited-table";
+import { measureColumnWidths, parseDelimitedTable, visibleRowRange, type DelimitedTableData } from "@/lib/delimited-table";
 
 const ROW_HEIGHT = 26;
 const GUTTER_WIDTH = 56;
@@ -58,15 +58,20 @@ const CELL: CSSProperties = {
 export function DelimitedTable({
   content,
   filePath,
-  complete,
+  complete = true,
   scrollRef,
+  tableData,
 }: {
-  content: string;
-  filePath: string;
-  complete: boolean;
+  content?: string;
+  filePath?: string;
+  complete?: boolean;
   scrollRef: RefObject<HTMLElement | null>;
+  tableData?: DelimitedTableData;
 }) {
-  const table = useMemo(() => parseDelimitedTable(content, filePath, complete), [complete, content, filePath]);
+  const table = useMemo(
+    () => tableData ?? (content != null && filePath != null ? parseDelimitedTable(content, filePath, complete) : { columns: [], headerLine: 1, rows: [], rowLines: [] }),
+    [tableData, complete, content, filePath],
+  );
   const widths = useMemo(() => measureColumnWidths(table.columns, table.rows), [table]);
   const totalWidth = useMemo(() => widths.reduce((sum, width) => sum + width, GUTTER_WIDTH), [widths]);
   const [scrollTop, setScrollTop] = useState(0);

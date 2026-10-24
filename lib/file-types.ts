@@ -2,6 +2,8 @@ export const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
 export const IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 export const DOCX_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 export const HTML_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
+export const SPREADSHEET_PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
+export const RTF_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 
 export type DocumentPreviewKind = "pdf" | "docx";
 
@@ -86,4 +88,13 @@ export function isVideoPath(filePath: string): boolean {
 
 export function isDocumentPreviewPath(filePath: string): boolean {
   return documentPreviewKind(filePath) !== null;
+}
+
+export function isSpreadsheetPath(filePath: string): boolean {
+  const ext = getFileExt(filePath);
+  return ext === "xlsx" || ext === "xls" || ext === "xlsm" || ext === "xlsb";
+}
+
+export function isRtfPath(filePath: string): boolean {
+  return getFileExt(filePath) === "rtf";
 }
