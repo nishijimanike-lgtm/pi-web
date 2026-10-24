@@ -20,6 +20,7 @@ param(
     [int]$Port = 30141,
     [string]$Hostname = "127.0.0.1",
     [string]$Mode = "start",
+    [string]$Root = "",
     [switch]$NoAutostart,
     [switch]$StartImmediately,
     [switch]$Quiet
@@ -136,6 +137,7 @@ $configData = @{
     autostart = (!$NoAutostart)
     openBrowserOnLaunch = $false
     autoRestart = $true
+    root = if ($Root) { $Root } else { $RepoRoot }
 }
 
 if (Test-Path $ConfigPath) {
@@ -143,6 +145,7 @@ if (Test-Path $ConfigPath) {
         $existing = Get-Content $ConfigPath -Raw | ConvertFrom-Json
         if ($existing.openBrowserOnLaunch -ne $null) { $configData.openBrowserOnLaunch = [bool]$existing.openBrowserOnLaunch }
         if ($existing.autoRestart -ne $null) { $configData.autoRestart = [bool]$existing.autoRestart }
+        if (![string]::IsNullOrWhiteSpace($existing.root) -and [string]::IsNullOrWhiteSpace($Root)) { $configData.root = [string]$existing.root }
     } catch { }
 }
 

@@ -337,8 +337,12 @@ export async function installTrayShortcuts(
     return { success: false, message: "Windows service installation is only supported on Windows platforms." };
   }
 
-  const savedConfig = await saveWebServiceConfig(options);
   const repoRoot = getRepoRoot();
+  const installOptions = {
+    ...options,
+    root: options.root || repoRoot,
+  };
+  const savedConfig = await saveWebServiceConfig(installOptions);
   const installScript = path.join(repoRoot, "scripts", "windows", "install-tray.ps1");
 
   const psArgs = [
@@ -353,6 +357,8 @@ export async function installTrayShortcuts(
     savedConfig.hostname,
     "-Mode",
     savedConfig.mode,
+    "-Root",
+    savedConfig.root,
   ];
 
   if (!savedConfig.autostart) {
