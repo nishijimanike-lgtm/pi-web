@@ -28,19 +28,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: reason }, { status: 403 });
     }
 
-    const body = await request.json() as { cwd?: unknown };
-    if (typeof body.cwd !== "string" || !body.cwd.trim()) {
+    const body = await request.json() as { cwd?: unknown; filePath?: unknown };
+    const isFileTarget = typeof body.filePath === "string" && body.filePath.trim().length > 0;
+    const isCwdTarget = typeof body.cwd === "string" && body.cwd.trim().length > 0;
+
+    if (!isFileTarget && !isCwdTarget) {
       return NextResponse.json({ error: "cwd-required" }, { status: 400 });
     }
-    const target = resolve(body.cwd);
+
+    const rawTarget = isFileTarget ? (body.filePath as string) : (body.cwd as string);
+    const target = resolve(rawTarget);
     // Authorize before touching the path, so a location outside the allowed
     // roots answers 403 whether or not it exists.
     const roots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(target, roots)) {
       return NextResponse.json({ error: "access-denied" }, { status: 403 });
     }
-    if (!(await stat(target)).isDirectory()) {
+    const targetStat = await stat(target);
+    if (isCwdTarget && !targetStat.isDirectory()) {
       return NextResponse.json({ error: "not-a-directory" }, { status: 400 });
+    }
+    if (isFileTarget && !targetStat.isFile()) {
+      return NextResponse.json({ error: "not-a-file" }, { status: 400 });
     }
 
     await launchFileManager(target);

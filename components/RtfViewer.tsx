@@ -5,6 +5,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { getFileExt, RTF_PREVIEW_MAX_BYTES } from "@/lib/file-types";
 import { fileVersion, fileVersionChanged } from "@/lib/file-version";
 import { getFileApiUrl, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { extractRtfText } from "@/lib/rtf-extractor";
 
 interface Props {
   filePath: string;
@@ -48,66 +49,150 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
   const [displayMode, setDisplayMode] = useState<DisplayMode>("preview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isFallback, setIsFallback] = useState(false);
   const [size, setSize] = useState<number | null>(null);
   const [watching, setWatching] = useState(false);
   const [rawText, setRawText] = useState<string>("");
+  const [extractedText, setExtractedText] = useState<string>("");
   const [renderedElements, setRenderedElements] = useState<HTMLElement[] | null>(null);
+
+  const [openAppSupported, setOpenAppSupported] = useState(false);
+  const [openAppLoading, setOpenAppLoading] = useState(false);
+  const [openAppFeedback, setOpenAppFeedback] = useState<string | null>(null);
 
   const esRef = useRef<EventSource | null>(null);
   const loadRequestRef = useRef(0);
   const shownVersionRef = useRef<string | null>(null);
 
+  // Check if opening files in native system applications is supported (loopback / desktop)
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/open-in-explorer")
+      .then((res) => (res.ok ? (res.json() as Promise<{ supported?: boolean }>) : null))
+      .then((data) => {
+        if (!cancelled && data?.supported) {
+          setOpenAppSupported(true);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleOpenInSystemApp = useCallback(async () => {
+    setOpenAppLoading(true);
+    setOpenAppFeedback(null);
+    try {
+      const res = await fetch("/api/open-in-explorer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath }),
+      });
+      if (res.ok) {
+        setOpenAppFeedback(t("i18n.openInDefaultAppSuccess"));
+        setTimeout(() => setOpenAppFeedback(null), 3000);
+      } else {
+        setOpenAppFeedback(t("i18n.openInDefaultAppFailed"));
+        setTimeout(() => setOpenAppFeedback(null), 4000);
+      }
+    } catch {
+      setOpenAppFeedback(t("i18n.openInDefaultAppFailed"));
+      setTimeout(() => setOpenAppFeedback(null), 4000);
+    } finally {
+      setOpenAppLoading(false);
+    }
+  }, [filePath, t]);
+
   const loadRtf = useCallback((filePath: string) => {
     const requestId = ++loadRequestRef.current;
     setLoading(true);
     setError(null);
+    setIsFallback(false);
+    setRenderedElements(null);
 
     fetch(getFileApiUrl(filePath, "download", sourceSessionId))
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const arrayBuffer = await res.arrayBuffer();
-        if (requestId !== loadRequestRef.current) return null;
+        if (requestId !== loadRequestRef.current) return;
 
-        // Save raw text representation for source view
+        // Decode text for source view and plain-text fallback extraction
+        let text = "";
         try {
-          const text = new TextDecoder("utf-8").decode(arrayBuffer);
+          text = new TextDecoder("utf-8").decode(arrayBuffer);
           setRawText(text);
+          const extracted = extractRtfText(text);
+          setExtractedText(extracted);
         } catch {
-          // Ignore decoding issues for source view
+          // Ignore decoding issues
         }
 
         if (arrayBuffer.byteLength > RTF_PREVIEW_MAX_BYTES) {
-          throw new Error(`RTF file too large for preview (>${RTF_PREVIEW_MAX_BYTES / 1024 / 1024}MB)`);
+          // If file is very large, fall back to extracted text directly
+          setIsFallback(true);
+          setLoading(false);
+          return;
         }
 
-        // Lazy-load rtf.js on demand
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rtfModule: any = await import("rtf.js/dist/RTFJS.bundle.js");
-        const RTFJS = rtfModule.RTFJS || rtfModule.default?.RTFJS || rtfModule.default || rtfModule;
-        if (typeof RTFJS.loggingEnabled === "function") {
-          RTFJS.loggingEnabled(false);
-        }
-
-        const DocClass = RTFJS.Document || rtfModule.Document || rtfModule.default?.Document;
-        if (!DocClass) {
-          throw new Error("Failed to load RTF Document class");
-        }
-
-        const doc = new DocClass(arrayBuffer);
-        const htmlElements: HTMLElement[] = await doc.render();
-
-        return htmlElements;
-      })
-      .then((elements) => {
-        if (!elements || requestId !== loadRequestRef.current) return;
-        setRenderedElements(elements);
-        if (containerRef.current) {
-          containerRef.current.innerHTML = "";
-          for (const el of elements) {
-            containerRef.current.appendChild(el);
+        try {
+          // Ensure window globals for WMFJS / EMFJS before evaluating RTFJS
+          if (typeof window !== "undefined") {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const win = window as any;
+            if (!win.EMFJS) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const emf: any = await import("rtf.js/dist/EMFJS.bundle.js");
+                win.EMFJS = emf.EMFJS || emf.default || emf;
+              } catch {
+                win.EMFJS = {};
+              }
+            }
+            if (!win.WMFJS) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const wmf: any = await import("rtf.js/dist/WMFJS.bundle.js");
+                win.WMFJS = wmf.WMFJS || wmf.default || wmf;
+              } catch {
+                win.WMFJS = {};
+              }
+            }
           }
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const rtfModule: any = await import("rtf.js/dist/RTFJS.bundle.js");
+          const RTFJS = rtfModule.RTFJS || rtfModule.default?.RTFJS || rtfModule.default || rtfModule;
+          if (typeof RTFJS.loggingEnabled === "function") {
+            RTFJS.loggingEnabled(false);
+          }
+
+          const DocClass = RTFJS.Document || rtfModule.Document || rtfModule.default?.Document;
+          if (!DocClass) {
+            throw new Error("Failed to load RTF Document class");
+          }
+
+          const doc = new DocClass(arrayBuffer);
+          const htmlElements: HTMLElement[] = await doc.render();
+
+          if (requestId !== loadRequestRef.current) return;
+          setRenderedElements(htmlElements);
+          setIsFallback(false);
+          if (containerRef.current) {
+            containerRef.current.innerHTML = "";
+            for (const el of htmlElements) {
+              containerRef.current.appendChild(el);
+            }
+          }
+          setLoading(false);
+        } catch (err) {
+          if (requestId !== loadRequestRef.current) return;
+          // Graceful fallback: when rtf.js encounters unsupported control words or tables,
+          // switch to clean extracted text view instead of failing
+          console.warn("[RtfViewer] rtf.js parsing fallback:", err);
+          setIsFallback(true);
+          setLoading(false);
         }
-        setLoading(false);
       })
       .catch((err) => {
         if (requestId !== loadRequestRef.current) return;
@@ -118,13 +203,13 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
 
   // Keep the DOM populated whenever renderedElements or displayMode updates
   useEffect(() => {
-    if (displayMode === "preview" && containerRef.current && renderedElements) {
+    if (displayMode === "preview" && !isFallback && containerRef.current && renderedElements) {
       containerRef.current.innerHTML = "";
       for (const el of renderedElements) {
         containerRef.current.appendChild(el);
       }
     }
-  }, [displayMode, renderedElements]);
+  }, [displayMode, isFallback, renderedElements]);
 
   useEffect(() => {
     shownVersionRef.current = null;
@@ -212,7 +297,7 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
             }}
             onClick={() => setDisplayMode("preview")}
           >
-            Preview
+            {t("i18n.preview")}
           </button>
           <button
             type="button"
@@ -228,9 +313,39 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
             }}
             onClick={() => setDisplayMode("source")}
           >
-            Source
+            {t("i18n.source")}
           </button>
         </div>
+
+        {/* Action: Open in OS native app (Word / WordPad / TextEdit) */}
+        {openAppSupported && (
+          <button
+            type="button"
+            onClick={handleOpenInSystemApp}
+            disabled={openAppLoading}
+            title={t("i18n.openInDefaultApp")}
+            className="file-viewer-mode-button"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "2px 8px",
+              fontSize: 11,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
+              background: "transparent",
+              color: "var(--text)",
+              cursor: openAppLoading ? "wait" : "pointer",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+            <span>{openAppLoading ? "..." : (openAppFeedback ?? t("i18n.openInDefaultApp"))}</span>
+          </button>
+        )}
 
         <span style={{ marginLeft: "auto" }}>{ext || "rtf preview"}</span>
         {size != null && <span>{formatSize(size)}</span>}
@@ -287,8 +402,8 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
             background: "var(--bg-panel)",
             padding: 24,
             display: "flex",
-            justifyContent: "flex-start",
-            alignItems: "flex-start",
+            flexDirection: "column",
+            alignItems: "center",
           }}
         >
           {loading && (
@@ -296,6 +411,7 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
               Loading RTF document...
             </div>
           )}
+
           {error && !loading && (
             <div style={{ margin: "auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, color: "#f87171", fontSize: 13, textAlign: "center", padding: 24 }}>
               <div>{error}</div>
@@ -312,15 +428,114 @@ export function RtfViewer({ filePath, cwd, sourceSessionId, watchEnabled = true 
                 }}
                 onClick={() => setDisplayMode("source")}
               >
-                View Raw RTF
+                {t("i18n.viewRawRtf")}
               </button>
             </div>
           )}
+
+          {/* Complex RTF / Fallback Notice Banner */}
+          {!loading && !error && isFallback && (
+            <div
+              style={{
+                width: "min(100%, 780px)",
+                margin: "0 auto 16px auto",
+                padding: "10px 14px",
+                borderRadius: 6,
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                fontSize: 12,
+                lineHeight: 1.5,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, color: "var(--text-muted)" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2, color: "#eab308" }}>
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{t("i18n.rtfFallbackNotice")}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 22 }}>
+                {openAppSupported && (
+                  <button
+                    type="button"
+                    onClick={handleOpenInSystemApp}
+                    disabled={openAppLoading}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "3px 10px",
+                      fontSize: 11,
+                      borderRadius: 4,
+                      border: "1px solid var(--border)",
+                      background: "var(--accent)",
+                      color: "#ffffff",
+                      cursor: openAppLoading ? "wait" : "pointer",
+                      fontWeight: 500,
+                    }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                      <polyline points="15 3 21 3 21 9" />
+                      <line x1="10" y1="14" x2="21" y2="3" />
+                    </svg>
+                    <span>{openAppLoading ? "..." : (openAppFeedback ?? t("i18n.openInDefaultApp"))}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDisplayMode("source")}
+                  style={{
+                    padding: "3px 10px",
+                    fontSize: 11,
+                    borderRadius: 4,
+                    border: "1px solid var(--border)",
+                    background: "transparent",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t("i18n.viewRawRtf")}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* RTF Fallback extracted content paper */}
+          {!loading && !error && isFallback && (
+            <div
+              style={{
+                width: "fit-content",
+                minWidth: "min(100%, 780px)",
+                maxWidth: "100%",
+                margin: "0 auto",
+                background: "#ffffff",
+                color: "#1f2937",
+                padding: "36px 44px",
+                boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06)",
+                borderRadius: 4,
+                fontSize: 13,
+                lineHeight: 1.6,
+                fontFamily: "var(--font-mono), Consolas, monospace",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                boxSizing: "border-box",
+              }}
+            >
+              {extractedText || "(No readable text extracted)"}
+            </div>
+          )}
+
+          {/* rtf.js rendered HTML document */}
           <div
             ref={containerRef}
             className="rtf-preview-document"
             style={{
-              display: loading || error ? "none" : "block",
+              display: loading || error || isFallback ? "none" : "block",
               width: "fit-content",
               minWidth: "min(100%, 720px)",
               maxWidth: "100%",
