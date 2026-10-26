@@ -2,6 +2,7 @@ use std::fs;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -64,6 +65,7 @@ impl Default for WebServiceConfig {
 
 pub struct ProcessManager {
     child: Mutex<Option<Child>>,
+    manual_stop: AtomicBool,
     #[cfg(target_os = "windows")]
     _job: Mutex<Option<win_job::KillOnCloseJob>>,
 }
@@ -72,9 +74,18 @@ impl ProcessManager {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            manual_stop: AtomicBool::new(false),
             #[cfg(target_os = "windows")]
             _job: Mutex::new(None),
         }
+    }
+
+    pub fn is_manual_stopped(&self) -> bool {
+        self.manual_stop.load(Ordering::SeqCst)
+    }
+
+    pub fn set_manual_stopped(&self, stopped: bool) {
+        self.manual_stop.store(stopped, Ordering::SeqCst);
     }
 
     pub fn get_agent_dir(&self) -> PathBuf {
@@ -167,6 +178,7 @@ impl ProcessManager {
     }
 
     pub fn ensure_server_running(&self) -> Result<(), String> {
+        self.set_manual_stopped(false);
         let config = self.load_config();
         let port = config.port;
 
@@ -175,13 +187,29 @@ impl ProcessManager {
             return Ok(());
         }
 
+        // Clean up any stale child process handle before spawning a fresh one
+        {
+            let mut child_lock = self.child.lock().unwrap();
+            if let Some(mut old_child) = child_lock.take() {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &old_child.id().to_string(), "/T", "/F"])
+                        .creation_flags(0x08000000)
+                        .output();
+                }
+                let _ = old_child.kill();
+                let _ = old_child.wait();
+            }
+        }
+
         log::info!("Port {} is not active; starting Node.js server...", port);
         let root = self.find_project_root();
         log::info!("Using project root: {:?}", root);
 
         let mut mode = config.mode.clone();
-        if mode == "start" && !root.join(".next").exists() {
-            log::info!(".next directory not found. Automatically falling back to dev mode.");
+        if mode == "start" && !root.join(".next").join("BUILD_ID").exists() {
+            log::info!(".next production build (BUILD_ID) not found. Automatically falling back to dev mode.");
             mode = "dev".to_string();
         }
 
@@ -261,19 +289,35 @@ impl ProcessManager {
     }
 
     pub fn stop_managed_server(&self) {
+        self.set_manual_stopped(true);
         let mut child_lock = self.child.lock().unwrap();
         if let Some(mut child) = child_lock.take() {
-            log::info!("Stopping managed Node.js server...");
+            log::info!("Stopping managed Node.js server (PID {})...", child.id());
+            #[cfg(target_os = "windows")]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                    .creation_flags(0x08000000)
+                    .output();
+            }
             let _ = child.kill();
             let _ = child.wait();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let mut job_lock = self._job.lock().unwrap();
+            *job_lock = None;
         }
     }
 
     pub fn restart_managed_server(&self) -> Result<(), String> {
+        self.stop_managed_server();
+        // Clear manual_stop flag again since stop_managed_server set it to true
+        self.set_manual_stopped(false);
+
         let config = self.load_config();
         let port = config.port;
-
-        self.stop_managed_server();
 
         // Wait up to 6 seconds for port to free up
         if !self.wait_for_port_free(port, Duration::from_secs(6)) {

@@ -72,7 +72,8 @@ if ($OpenBrowser) {
 }
 
 $NextDir = Join-Path $RepoRoot ".next"
-if ($EffectiveMode -eq "start" -and !(Test-Path $NextDir)) {
+$BuildIdPath = Join-Path $NextDir "BUILD_ID"
+if ($EffectiveMode -eq "start" -and !(Test-Path $BuildIdPath)) {
     $EffectiveMode = "dev"
 }
 

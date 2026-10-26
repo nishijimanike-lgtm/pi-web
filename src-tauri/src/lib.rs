@@ -80,7 +80,70 @@ pub fn run() {
                 }
 
                 if server_ready.is_ok() && open_browser_on_launch {
-                    let _ = open::that(target_url);
+                    let _ = open::that(target_url.clone());
+                }
+
+                // Background Health Monitoring & Crash Supervisor Loop
+                let mut crash_timestamps: Vec<std::time::Instant> = Vec::new();
+                let mut server_was_down = false;
+
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(3000));
+
+                    let cfg = pm.load_config();
+                    let port = cfg.port;
+                    let is_listening = pm.is_port_listening(port);
+
+                    if is_listening {
+                        if server_was_down {
+                            log::info!("Server on port {} has recovered. Reloading main window...", port);
+                            server_was_down = false;
+                            if let Some(win) = handle.get_webview_window("main") {
+                                if let Ok(url) = tauri::Url::parse(&target_url) {
+                                    let _ = win.navigate(url);
+                                }
+                            }
+                        }
+                        crash_timestamps.retain(|t| t.elapsed() < std::time::Duration::from_secs(30));
+                        continue;
+                    }
+
+                    // If user manually stopped the server or auto_restart is disabled, do not restart
+                    if pm.is_manual_stopped() || !cfg.auto_restart {
+                        continue;
+                    }
+
+                    server_was_down = true;
+
+                    // Crash loop prevention: max 3 crashes within 30 seconds
+                    let now = std::time::Instant::now();
+                    crash_timestamps.retain(|t| t.elapsed() < std::time::Duration::from_secs(30));
+                    if crash_timestamps.len() >= 3 {
+                        log::error!(
+                            "CRASH LOOP: Server failed 3 times within 30 seconds. Pausing auto-restart for 30 seconds."
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        crash_timestamps.clear();
+                        continue;
+                    }
+
+                    log::warn!("Background server on port {} is down. Triggering auto-restart...", port);
+                    crash_timestamps.push(now);
+
+                    match pm.restart_managed_server() {
+                        Ok(()) => {
+                            log::info!("Successfully auto-restarted server on port {}.", port);
+                            if let Some(win) = handle.get_webview_window("main") {
+                                if let Ok(url) = tauri::Url::parse(&target_url) {
+                                    let _ = win.navigate(url);
+                                }
+                            }
+                            server_was_down = false;
+                        }
+                        Err(e) => {
+                            log::error!("Auto-restart failed: {}", e);
+                        }
+                    }
                 }
             });
 

@@ -262,7 +262,7 @@ export async function isTrayProcessRunning(): Promise<boolean> {
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        '$native = Get-Process -Name "pi-web" -ErrorAction SilentlyContinue; if (!$native) { $native = Get-Process -Name "pi-web-tray" -ErrorAction SilentlyContinue }; if ($native) { ($native | Measure-Object).Count } else { $scripts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*pi-web-tray.ps1*" -or $_.CommandLine -like "*pi-web-service.ps1*" }; ($scripts | Measure-Object).Count }',
+        '$native = Get-Process -Name "pi-web" -ErrorAction SilentlyContinue; if (!$native) { $native = Get-Process -Name "pi-web-tray" -ErrorAction SilentlyContinue }; if ($native) { ($native | Measure-Object).Count } else { $scripts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like "*pi-web-tray.ps1*" -or $_.CommandLine -like "*pi-web-service.ps1*") }; ($scripts | Measure-Object).Count }',
       ],
       { timeout: 4000, env: getWindowsExecutionEnv(), windowsHide: true }
     );
