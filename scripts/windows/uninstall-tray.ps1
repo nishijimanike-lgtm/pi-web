@@ -30,13 +30,13 @@ try {
     $taskkillExe = Join-Path $env:SystemRoot "System32\taskkill.exe"
     if (!(Test-Path $taskkillExe)) { $taskkillExe = "taskkill.exe" }
 
-    $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%' OR Name LIKE '%pi-web-tray%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*pi-web-tray.ps1*' -or $_.CommandLine -like '*pi-web-service.ps1*' -or $_.CommandLine -like '*pi-web-tray.exe*') }
+    $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%' OR Name LIKE '%pi-web-tray%' OR Name LIKE '%pi-web%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*pi-web-tray.ps1*' -or $_.CommandLine -like '*pi-web-service.ps1*' -or $_.CommandLine -like '*pi-web-tray.exe*' -or $_.CommandLine -like '*pi-web.exe*') }
     foreach ($p in $trayProcs) {
         Log-Message "  Stopping background tray process tree (PID $($p.ProcessId))..."
         Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
     }
 
-    $nativeProcs = Get-CimInstance Win32_Process -Filter "Name = 'pi-web-tray.exe'" -ErrorAction SilentlyContinue
+    $nativeProcs = Get-CimInstance Win32_Process -Filter "Name = 'pi-web.exe' OR Name = 'pi-web-tray.exe'" -ErrorAction SilentlyContinue
     foreach ($p in $nativeProcs) {
         Log-Message "  Stopping native tray process (PID $($p.ProcessId))..."
         Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null

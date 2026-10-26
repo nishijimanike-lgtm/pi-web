@@ -20,6 +20,7 @@ param(
     [int]$Port = 30141,
     [string]$Hostname = "127.0.0.1",
     [string]$Mode = "start",
+    [string]$Root = "",
     [switch]$NoAutostart,
     [switch]$StartImmediately,
     [switch]$Quiet
@@ -136,6 +137,7 @@ $configData = @{
     autostart = (!$NoAutostart)
     openBrowserOnLaunch = $false
     autoRestart = $true
+    root = if ($Root) { $Root } else { $RepoRoot }
 }
 
 if (Test-Path $ConfigPath) {
@@ -143,6 +145,7 @@ if (Test-Path $ConfigPath) {
         $existing = Get-Content $ConfigPath -Raw | ConvertFrom-Json
         if ($existing.openBrowserOnLaunch -ne $null) { $configData.openBrowserOnLaunch = [bool]$existing.openBrowserOnLaunch }
         if ($existing.autoRestart -ne $null) { $configData.autoRestart = [bool]$existing.autoRestart }
+        if (![string]::IsNullOrWhiteSpace($existing.root) -and [string]::IsNullOrWhiteSpace($Root)) { $configData.root = [string]$existing.root }
     } catch { }
 }
 
@@ -158,8 +161,22 @@ if (!(Test-Path $wscriptExe)) {
     $wscriptExe = "wscript.exe"
 }
 $LaunchVbs = Join-Path $RepoRoot "scripts\windows\launch-tray.vbs"
-$nativeExe = Join-Path $RepoRoot "bin\pi-web-tray.exe"
-$useNative = Test-Path $nativeExe
+
+$nativeCandidates = @(
+    (Join-Path $RepoRoot "src-tauri\target\release\pi-web.exe"),
+    (Join-Path $RepoRoot "bin\pi-web.exe"),
+    (Join-Path $RepoRoot "src-tauri\target\debug\pi-web.exe"),
+    (Join-Path $RepoRoot "bin\pi-web-tray.exe")
+)
+$nativeExe = $null
+foreach ($cand in $nativeCandidates) {
+    if (Test-Path $cand) {
+        $nativeExe = $cand
+        break
+    }
+}
+$useNative = ($null -ne $nativeExe)
+$isTauri = ($useNative -and ((Split-Path -Leaf $nativeExe).ToLower() -eq "pi-web.exe"))
 
 # Desktop Shortcut
 $desktopDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
@@ -168,7 +185,7 @@ try {
     $sc = $wsh.CreateShortcut($desktopLnk)
     if ($useNative) {
         $sc.TargetPath = $nativeExe
-        $sc.Arguments = "-OpenBrowser"
+        $sc.Arguments = if ($isTauri) { "" } else { "-OpenBrowser" }
     } else {
         $sc.TargetPath = $wscriptExe
         $sc.Arguments = "`"$LaunchVbs`" -OpenBrowser"
@@ -177,7 +194,7 @@ try {
     if (Test-Path $IcoPath) { $sc.IconLocation = "$IcoPath,0" }
     $sc.Description = "Open Pi Web AI Coding Agent Web Interface"
     $sc.Save()
-    Log-Message "  [OK] Desktop shortcut created: $desktopLnk $(if ($useNative) { '(native tray)' } else { '' })"
+    Log-Message "  [OK] Desktop shortcut created: $desktopLnk $(if ($useNative) { if ($isTauri) { '(Tauri desktop tray)' } else { '(native tray)' } } else { '' })"
 } catch {
     Log-Message "  [FAIL] Failed to create desktop shortcut: $($_.Exception.Message)"
 }
@@ -189,7 +206,7 @@ try {
     $sc = $wsh.CreateShortcut($startMenuLnk)
     if ($useNative) {
         $sc.TargetPath = $nativeExe
-        $sc.Arguments = "-OpenBrowser"
+        $sc.Arguments = if ($isTauri) { "" } else { "-OpenBrowser" }
     } else {
         $sc.TargetPath = $wscriptExe
         $sc.Arguments = "`"$LaunchVbs`" -OpenBrowser"
@@ -198,7 +215,7 @@ try {
     if (Test-Path $IcoPath) { $sc.IconLocation = "$IcoPath,0" }
     $sc.Description = "Pi Web System Tray & Web Interface"
     $sc.Save()
-    Log-Message "  [OK] Start Menu shortcut created: $startMenuLnk $(if ($useNative) { '(native tray)' } else { '' })"
+    Log-Message "  [OK] Start Menu shortcut created: $startMenuLnk $(if ($useNative) { if ($isTauri) { '(Tauri desktop tray)' } else { '(native tray)' } } else { '' })"
 } catch {
     Log-Message "  [FAIL] Failed to create Start Menu shortcut: $($_.Exception.Message)"
 }
@@ -211,7 +228,7 @@ if (!$NoAutostart) {
         $sc = $wsh.CreateShortcut($startupLnk)
         if ($useNative) {
             $sc.TargetPath = $nativeExe
-            $sc.Arguments = "-Startup"
+            $sc.Arguments = if ($isTauri) { "--tray" } else { "-Startup" }
         } else {
             $sc.TargetPath = $wscriptExe
             $sc.Arguments = "`"$LaunchVbs`" -Startup"
@@ -220,7 +237,7 @@ if (!$NoAutostart) {
         if (Test-Path $IcoPath) { $sc.IconLocation = "$IcoPath,0" }
         $sc.Description = "Pi Web Background Tray Service"
         $sc.Save()
-        Log-Message "  [OK] Windows Startup shortcut created: $startupLnk $(if ($useNative) { '(native tray)' } else { '' })"
+        Log-Message "  [OK] Windows Startup shortcut created: $startupLnk $(if ($useNative) { if ($isTauri) { '(Tauri desktop tray)' } else { '(native tray)' } } else { '' })"
     } catch {
         Log-Message "  [FAIL] Failed to create Startup shortcut: $($_.Exception.Message)"
     }
@@ -231,42 +248,50 @@ if (!$NoAutostart) {
 }
 
 # -----------------------------------------------------------------------------
-# 3b. Register Scheduled Task for headless service
+# 3b. Scheduled Task Cleanup / Registration
 # -----------------------------------------------------------------------------
-$ServicePs1 = Join-Path $RepoRoot "scripts\windows\pi-web-service.ps1"
-if (!$NoAutostart -and (Test-Path $ServicePs1)) {
-    try {
-        $taskName = "pi-web"
-        $actionArg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ServicePs1`""
-        $createArgs = "/create /tn `"$taskName`" /tr `"powershell $actionArg`" /sc onlogon /f"
-        $proc = Start-Process -FilePath "schtasks.exe" -ArgumentList $createArgs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue
-        if ($proc.ExitCode -eq 0) {
-            Log-Message "  [OK] Scheduled Task created: $taskName (ONLOGON)"
-            if (Test-Path $startupLnk) {
-                Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
-                Log-Message "  [INFO] Cleaned up duplicate Startup shortcut to avoid port conflict."
-            }
-        } else {
-            try {
-                $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArg
-                $trigger = New-ScheduledTaskTrigger -AtLogOn
-                $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-                Log-Message "  [OK] Scheduled Task created via PowerShell: $taskName"
+if ($isTauri) {
+    # Tauri native executable manages the tray and background process directly.
+    # Remove any legacy headless Scheduled Task to prevent terminal window popup.
+    try { schtasks /delete /tn "pi-web" /f 2>$null | Out-Null } catch { }
+    try { Unregister-ScheduledTask -TaskName "pi-web" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+    Log-Message "  [OK] Cleaned up legacy Scheduled Task to ensure silent background operation."
+} else {
+    $ServicePs1 = Join-Path $RepoRoot "scripts\windows\pi-web-service.ps1"
+    if (!$NoAutostart -and (Test-Path $ServicePs1)) {
+        try {
+            $taskName = "pi-web"
+            $actionArg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ServicePs1`""
+            $createArgs = "/create /tn `"$taskName`" /tr `"powershell $actionArg`" /sc onlogon /f"
+            $proc = Start-Process -FilePath "schtasks.exe" -ArgumentList $createArgs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue
+            if ($proc.ExitCode -eq 0) {
+                Log-Message "  [OK] Scheduled Task created: $taskName (ONLOGON)"
                 if (Test-Path $startupLnk) {
                     Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
                     Log-Message "  [INFO] Cleaned up duplicate Startup shortcut to avoid port conflict."
                 }
-            } catch {
-                Log-Message "  [WARN] Failed to create Scheduled Task: $($_.Exception.Message)"
+            } else {
+                try {
+                    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArg
+                    $trigger = New-ScheduledTaskTrigger -AtLogOn
+                    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+                    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+                    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+                    Log-Message "  [OK] Scheduled Task created via PowerShell: $taskName"
+                    if (Test-Path $startupLnk) {
+                        Remove-Item -Path $startupLnk -Force -ErrorAction SilentlyContinue
+                        Log-Message "  [INFO] Cleaned up duplicate Startup shortcut to avoid port conflict."
+                    }
+                } catch {
+                    Log-Message "  [WARN] Failed to create Scheduled Task: $($_.Exception.Message)"
+                }
             }
+        } catch {
+            Log-Message "  [WARN] Scheduled Task creation failed: $($_.Exception.Message)"
         }
-    } catch {
-        Log-Message "  [WARN] Scheduled Task creation failed: $($_.Exception.Message)"
+    } elseif ($NoAutostart) {
+        try { schtasks /delete /tn "pi-web" /f 2>$null | Out-Null } catch { }
     }
-} elseif ($NoAutostart) {
-    try { schtasks /delete /tn "pi-web" /f 2>$null | Out-Null } catch { }
 }
 
 Log-Message ""

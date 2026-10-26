@@ -1,6 +1,6 @@
 [package]
 name = "pi-web"
-version = "0.9.1"
+version = "0.12.2"
 description = "Pi Web Desktop Application"
 authors = ["agegr", "pi-web contributors"]
 license = "MIT"
@@ -25,3 +25,4 @@ tauri = { version = "2.12.3", features = ["tray-icon", "image-png", "image-ico"]
 tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 open = "5.3"
+arboard = "3.4"

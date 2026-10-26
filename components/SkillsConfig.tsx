@@ -1,52 +1,68 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type {
+  SkillContentResponse,
   SkillInfo as Skill,
   SkillInstallScope,
   SkillSearchResult,
   SkillsResponse,
+  SkillToggleResult,
   SkillUpdateResult,
+  ProjectTrustStatus,
 } from "@/lib/api-types";
+import { displayPathWithin, shortenPath } from "@/lib/display-path";
+import { parseFrontmatter } from "@/lib/frontmatter";
 import {
   getLastSettingsSelection,
   setLastSettingsSelection,
 } from "@/lib/settings-navigation";
 import {
+  ConfigAddSourceHeading,
   ConfigButton,
   ConfigDetail,
   ConfigDetailActions,
   ConfigDetailHeader,
   ConfigDetailHeaderInfo,
   ConfigDetailStack,
-  ConfigDetailTitle,
   ConfigEmptyState,
   ConfigField,
   ConfigFooter,
   ConfigListAction,
   ConfigPanelShell,
+  ConfigSaveTarget,
+  ConfigScopeTag,
   ConfigSidebar,
   ConfigSidebarGroupLabel,
+  ConfigSidebarGroupStatus,
+  ConfigSidebarGroupSwitch,
   ConfigSidebarItem,
   ConfigSidebarList,
   ConfigSidebarText,
   ConfigSplitView,
   ConfigStatusDot,
   ConfigSwitch,
+  ConfigTrustNotice,
 } from "./SettingsUi";
+import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers";
+import { MarkdownBody } from "./MarkdownBody";
 
-function shortenPath(p: string): string {
-  // Match common home dir patterns: /Users/xxx, /home/xxx
-  return p.replace(/^\/(?:Users|home)\/[^/]+/, "~");
-}
+type SkillScope = "global" | "project" | "path";
+type Translate = ReturnType<typeof useI18n>["t"];
 
-function sourceLabel(skill: Skill): string {
+function sourceLabel(skill: Skill): SkillScope {
   const src = skill.sourceInfo?.source;
   const scope = skill.sourceInfo?.scope;
   if (scope === "user" || src === "user") return "global";
   if (scope === "project" || src === "project") return "project";
   return "path";
+}
+
+function scopeLabel(scope: SkillScope, t: Translate): string {
+  if (scope === "project") return t("skills.scope.project");
+  if (scope === "global") return t("skills.scope.global");
+  return t("skills.scope.path");
 }
 
 export function orderSkillsByDormancy<
@@ -58,14 +74,57 @@ export function orderSkillsByDormancy<
   ];
 }
 
+/**
+ * The skills a group switch would change: those of the group not already in
+ * the requested state.
+ */
+export function skillsToSwitch<
+  T extends Pick<Skill, "disableModelInvocation">,
+>(skills: T[], enabled: boolean): T[] {
+  return itemsToSwitch(skills, enabled, (skill) => !skill.disableModelInvocation);
+}
+
+/** Applies a bulk toggle's results; a skill whose file reported an error keeps its state. */
+export function applySkillToggleResults<
+  T extends Pick<Skill, "filePath" | "disableModelInvocation">,
+>(skills: T[], results: SkillToggleResult[], disableModelInvocation: boolean): T[] {
+  const changed = new Set(results.filter((result) => !result.error).map((result) => result.filePath));
+  return skills.map((skill) =>
+    changed.has(skill.filePath) ? { ...skill, disableModelInvocation } : skill,
+  );
+}
+
 function updateKey(skill: Skill): string | null {
   return skill.install
     ? `${skill.install.scope}\0${skill.install.package}`
     : null;
 }
 
-function shortVersion(version?: string): string {
-  return version ? version.slice(0, 8) : "unknown";
+function shortVersion(version: string | undefined, unknown: string): string {
+  return version ? version.slice(0, 8) : unknown;
+}
+
+export function skillInstructionsBody(content: string): string {
+  return parseFrontmatter(content).rest.trim();
+}
+
+/**
+ * A link in a skill document: a path in the skill folder, from the linking
+ * document's folder as pi resolves a skill's relative paths, and a heading.
+ * An absolute path or a `..` past the folder stays, for the route to refuse.
+ */
+export function resolveSkillLink(href: string, fromDocument: string): { document: string; anchor: string } {
+  const hash = href.indexOf("#");
+  const [linkPath, anchor] = [hash < 0 ? href : href.slice(0, hash), hash < 0 ? "" : href.slice(hash + 1)]
+    .map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+  if (!linkPath) return { document: fromDocument, anchor };
+  if (linkPath.startsWith("/")) return { document: linkPath, anchor };
+  const parts = fromDocument.split("/").slice(0, -1);
+  for (const part of linkPath.split("/")) {
+    if (part === ".." && parts.length && parts[parts.length - 1] !== "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return { document: parts.join("/"), anchor };
 }
 
 function SkillDetail({
@@ -96,14 +155,57 @@ function SkillDetail({
   const { t } = useI18n();
   const label = sourceLabel(skill);
   const enabled = !skill.disableModelInvocation;
+  const [instructions, setInstructions] = useState<string | null>(null);
+  const [instructionsError, setInstructionsError] = useState<string | null>(null);
+  // Documents opened from the instructions' links; the last one shows.
+  const rootDocument = skill.filePath.split(/[\\/]/).pop()!;
+  const [documents, setDocuments] = useState<string[]>([]);
+  const documentPath = documents.at(-1) ?? rootDocument;
+  const instructionsRef = useRef<HTMLDivElement>(null);
+  // The heading to bring into view once its document shows; "" is the top.
+  const pendingAnchor = useRef<string | null>(null);
+  const [anchorRequest, setAnchorRequest] = useState(0);
 
-  function displayPath(p: string): string {
-    if (label === "project" && p.startsWith(cwd)) {
-      const rel = p.slice(cwd.length).replace(/^[/\\]/, "");
-      return `./${rel}`;
-    }
-    return shortenPath(p);
-  }
+  const openLink = useCallback((href: string) => {
+    const link = resolveSkillLink(href, documentPath);
+    pendingAnchor.current = link.anchor;
+    if (link.document === documentPath) setAnchorRequest((request) => request + 1);
+    else setDocuments((open) => [...open, link.document]);
+  }, [documentPath]);
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchor.current;
+    const root = instructionsRef.current;
+    if (anchor === null || (instructions === null && !instructionsError) || !root) return;
+    pendingAnchor.current = null;
+    const heading = anchor ? root.querySelector(`[data-heading-anchor="${CSS.escape(anchor)}"]`) : null;
+    (heading ?? root).scrollIntoView({ block: "start" });
+  }, [instructions, instructionsError, anchorRequest]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setInstructions(null);
+    setInstructionsError(null);
+
+    const load = async () => {
+      try {
+        const params = new URLSearchParams({ cwd, filePath: skill.filePath });
+        if (documentPath !== rootDocument) params.set("document", documentPath);
+        const response = await fetch(`/api/skills/content?${params}`, { signal: controller.signal });
+        const data = (await response.json()) as Partial<SkillContentResponse> & { error?: string };
+        if (!response.ok || data.error || typeof data.content !== "string") {
+          throw new Error(data.error ?? `HTTP ${response.status}`);
+        }
+        setInstructions(skillInstructionsBody(data.content));
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setInstructionsError(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    void load();
+    return () => controller.abort();
+  }, [cwd, skill.filePath, documentPath, rootDocument]);
 
   return (
     <ConfigDetailStack>
@@ -111,11 +213,9 @@ function SkillDetail({
       <div className="skill-detail-heading">
         <ConfigDetailHeader>
           <ConfigDetailHeaderInfo>
-            <span className={`config-scope-tag${label === "project" ? " is-project" : ""}`}>
-              {label}
-            </span>
+            <ConfigScopeTag scope={label}>{scopeLabel(label, t)}</ConfigScopeTag>
             <span className="config-detail-path">
-              {displayPath(skill.filePath)}
+              {label === "project" ? displayPathWithin(skill.filePath, cwd) : shortenPath(skill.filePath)}
             </span>
           </ConfigDetailHeaderInfo>
           <ConfigDetailActions>
@@ -130,9 +230,7 @@ function SkillDetail({
         <div className="skill-detail-status-row">
           {!enabled && (
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-              {skill.disabledByFile
-                ? t("i18n.disabledByFileRename")
-                : t("i18n.hiddenButInvocable")}
+              {t("i18n.hiddenButInvocable")}
             </span>
           )}
           {saveError && (
@@ -144,7 +242,7 @@ function SkillDetail({
       </div>
 
       {skill.install?.skillsShUrl && (
-        <ConfigField label="Source">
+        <ConfigField label={t("config.source")}>
           <a
             href={skill.install.skillsShUrl}
             target="_blank"
@@ -160,10 +258,10 @@ function SkillDetail({
       )}
 
       {skill.install && (
-        <ConfigField label="Version">
+        <ConfigField label={t("i18n.version")}>
           <div className="skill-version-row">
             <span className="skill-version-value">
-              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash)}
+              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash, t("i18n.unknown"))}
             </span>
             {skill.install.canCheckForUpdates && (
               <ConfigButton
@@ -176,7 +274,7 @@ function SkillDetail({
             )}
             {updateStatus?.state === "update-available" && (
               <span className="skill-version-value is-update">
-                {shortVersion(updateStatus.latestVersion)}
+                {shortVersion(updateStatus.latestVersion, t("i18n.unknown"))}
               </span>
             )}
             {(checkingUpdate ||
@@ -216,16 +314,40 @@ function SkillDetail({
         </ConfigField>
       )}
 
-      <ConfigField label="Name">
+      <ConfigField label={t("config.name")}>
         <span className="skill-name-value">
           {skill.name}
         </span>
       </ConfigField>
 
-      <ConfigField label="Description">
+      <ConfigField label={t("i18n.description")}>
         <span className="skill-description">
           {skill.description}
         </span>
+      </ConfigField>
+
+      <ConfigField label={t("skills.instructions")} ref={instructionsRef}>
+        {documents.length > 0 && (
+          <ConfigDetailHeader>
+            <ConfigDetailHeaderInfo>
+              <ConfigButton size="small" onClick={() => { pendingAnchor.current = ""; setDocuments((open) => open.slice(0, -1)); }}>
+                {t("skills.documentBack")}
+              </ConfigButton>
+              <span className="config-detail-path" title={documentPath}>{documentPath}</span>
+            </ConfigDetailHeaderInfo>
+          </ConfigDetailHeader>
+        )}
+        {instructionsError ? (
+          <span role="alert" className="skill-instructions-status is-error">{instructionsError}</span>
+        ) : instructions === null ? (
+          <span role="status" className="skill-instructions-status">{t("i18n.loading")}</span>
+        ) : instructions ? (
+          <MarkdownBody className="skill-instructions" cwd={[skill.baseDir, ...documentPath.split("/").slice(0, -1)].join("/")} onNavigateLink={openLink}>
+            {instructions}
+          </MarkdownBody>
+        ) : (
+          <span className="skill-instructions-status">{t("skills.noInstructions")}</span>
+        )}
       </ConfigField>
     </ConfigDetailStack>
   );
@@ -279,13 +401,13 @@ function AddSkillPanel({
         return;
       }
       setResults(d.results ?? []);
-      if ((d.results ?? []).length === 0) setSearchError("No skills found");
+      if ((d.results ?? []).length === 0) setSearchError(t("i18n.noSkills"));
     } catch (e) {
       setSearchError(String(e));
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [t]);
 
   const install = useCallback(
     async (pkg: string) => {
@@ -331,7 +453,23 @@ function AddSkillPanel({
           marginBottom: 20,
         }}
       >
-        <ConfigDetailTitle>{t("i18n.addSkill")}</ConfigDetailTitle>
+        <ConfigAddSourceHeading
+          title={t("i18n.addSkill")}
+          catalogs={[{ href: "https://skills.sh", label: "skills.sh" }]}
+          target={
+            <ConfigSaveTarget
+              value={scope}
+              label={t("config.saveTo")}
+              options={[
+                { value: "global", label: scopeLabel("global", t) },
+                { value: "project", label: scopeLabel("project", t), disabled: !projectResourcesLoaded },
+              ]}
+              path={installPath}
+              disabledReason={t("trust.projectScopeUnavailable")}
+              onChange={setScope}
+            />
+          }
+        />
 
         {/* Search row */}
         <div style={{ display: "flex", gap: 8 }}>
@@ -363,56 +501,6 @@ function AddSkillPanel({
           </ConfigButton>
         </div>
 
-        {/* Scope + install path row */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div
-            style={{
-              display: "flex",
-              borderRadius: 5,
-              border: "1px solid var(--border)",
-              overflow: "hidden",
-              fontSize: 12,
-              flexShrink: 0,
-            }}
-          >
-            {(["global", "project"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => {
-                  if (s === "global" || projectResourcesLoaded) setScope(s);
-                }}
-                disabled={s === "project" && !projectResourcesLoaded}
-                title={s === "project" && !projectResourcesLoaded ? t("trust.projectScopeUnavailable") : undefined}
-                style={{
-                  padding: "3px 10px",
-                  border: "none",
-                  cursor: s === "project" && !projectResourcesLoaded ? "not-allowed" : "pointer",
-                  background: scope === s ? "var(--bg-selected)" : "none",
-                  color: scope === s ? "var(--text)" : "var(--text-dim)",
-                  fontWeight: scope === s ? 600 : 400,
-                  opacity: s === "project" && !projectResourcesLoaded ? 0.45 : 1,
-                  borderRight:
-                    s === "global" ? "1px solid var(--border)" : "none",
-                }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-          <span
-            style={{
-              fontSize: 12,
-              color: "var(--text-dim)",
-              fontFamily: "var(--font-mono)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            → {installPath}
-          </span>
-        </div>
-
         {/* Errors */}
         {searchError && (
           <div style={{ fontSize: 12, color: "#f87171" }}>{searchError}</div>
@@ -427,7 +515,7 @@ function AddSkillPanel({
       </div>
 
       {/* ── Results list ── */}
-      {results.length > 0 ? (
+      {results.length > 0 && (
         <div style={{ flex: 1, overflowY: "auto" }}>
           {results.map((r) => {
             const isInstalled =
@@ -530,24 +618,6 @@ function AddSkillPanel({
             );
           })}
         </div>
-      ) : (
-        !searchError &&
-        !searching && (
-          <div
-            style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}
-          >
-            Search{" "}
-            <a
-              href="https://skills.sh"
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: "var(--accent)", textDecoration: "none" }}
-            >
-              skills.sh
-            </a>{" "}
-            to discover and install skills for your agent.
-          </div>
-        )
       )}
     </ConfigDetailStack>
   );
@@ -557,10 +627,13 @@ export function SkillsConfig({
   cwd,
   onClose,
   embedded = false,
+  trust,
 }: {
   cwd: string;
   onClose: () => void;
   embedded?: boolean;
+  /** The page's trust status for `cwd`; a new decision loads the list again. */
+  trust?: ProjectTrustStatus | null;
 }) {
   const { t } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -569,6 +642,9 @@ export function SkillsConfig({
   const [selected, setSelected] = useState<string | null>(() => getLastSettingsSelection("skills", cwd));
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The group switch that is running, and what the last one left undone.
+  const [bulkGroup, setBulkGroup] = useState<string | null>(null);
+  const [groupStatus, setGroupStatus] = useState<{ group: string; error: string } | null>(null);
   const [addMode, setAddMode] = useState(false);
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, SkillUpdateResult>>({});
   const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
@@ -576,10 +652,7 @@ export function SkillsConfig({
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [projectResourcesLoaded, setProjectResourcesLoaded] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
-  const [scopeFilter, setScopeFilter] = useState<"all" | "project" | "global" | "path">("all");
-  const [batchUpdating, setBatchUpdating] = useState(false);
+
   const loadSkills = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -609,6 +682,18 @@ export function SkillsConfig({
     setUpdateError(null);
     void loadSkills();
   }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Whether the project's skills load follows its trust, which can change while
+  // this section stays mounted (hidden) in Settings: trusting from Settings ›
+  // MCP. A new decision loads the list again in place, keeping the selection and
+  // any update checks; the first load is the effect above.
+  const trustKey = projectTrustReloadKey(trust);
+  const loadedTrustKeyRef = useRef(trustKey);
+  useEffect(() => {
+    if (loadedTrustKeyRef.current === trustKey) return;
+    loadedTrustKeyRef.current = trustKey;
+    void loadSkills();
+  }, [trustKey, loadSkills]);
 
   useEffect(() => {
     if (selected) setLastSettingsSelection("skills", selected, cwd);
@@ -706,6 +791,7 @@ export function SkillsConfig({
     const next = !skill.disableModelInvocation;
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
+    setGroupStatus(null);
     try {
       const res = await fetch("/api/skills", {
         method: "PATCH",
@@ -727,9 +813,6 @@ export function SkillsConfig({
             : s,
         ),
       );
-      // A file-disabled skill (SKILL.md.disabled) is renamed to SKILL.md on enable,
-      // so its filePath changes; refresh the list to pick up the new path.
-      if (skill.disabledByFile && !next) await loadSkills();
     } catch (e) {
       setSaveError(String(e));
     } finally {
@@ -739,287 +822,65 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, [loadSkills]);
-  const filteredSkills = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return skills.filter((skill) => {
-      if (statusFilter === "enabled" && skill.disableModelInvocation) return false;
-      if (statusFilter === "disabled" && !skill.disableModelInvocation) return false;
+  }, []);
 
-      const scope = sourceLabel(skill);
-      if (scopeFilter !== "all" && scope !== scopeFilter) return false;
-
-      if (!q) return true;
-      return (
-        skill.name.toLowerCase().includes(q) ||
-        (skill.description && skill.description.toLowerCase().includes(q)) ||
-        skill.filePath.toLowerCase().includes(q) ||
-        (skill.install?.package && skill.install.package.toLowerCase().includes(q))
-      );
-    });
-  }, [skills, searchQuery, statusFilter, scopeFilter]);
-
-  const totalSkillsCount = skills.length;
-  const enabledSkillsCount = skills.filter((s) => !s.disableModelInvocation).length;
-  const hasActiveFilters = searchQuery.trim().length > 0 || statusFilter !== "all" || scopeFilter !== "all";
-
-  const clearFilters = () => {
-    setSearchQuery("");
-    setStatusFilter("all");
-    setScopeFilter("all");
-  };
-
-  const batchToggle = useCallback(async (targetSkills: Skill[], disable: boolean) => {
-    const needUpdate = targetSkills.filter((s) => Boolean(s.disableModelInvocation) !== disable);
-    if (needUpdate.length === 0) return;
-
-    setBatchUpdating(true);
+  // One PATCH for the whole group: each file is edited on its own and
+  // reported separately, so the skills the route refuses keep their state and
+  // are named under the group heading while the rest switch.
+  const setGroupSkills = useCallback(async (group: string, groupSkills: Skill[], enabled: boolean) => {
+    const targets = skillsToSwitch(groupSkills, enabled);
+    if (targets.length === 0) return;
+    const filePaths = targets.map((skill) => skill.filePath);
+    const disableModelInvocation = !enabled;
+    setToggling((current) => new Set([...current, ...filePaths]));
+    setBulkGroup(group);
     setSaveError(null);
+    setGroupStatus(null);
     try {
       const res = await fetch("/api/skills", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: needUpdate.map((s) => ({
-            filePath: s.filePath,
-            disableModelInvocation: disable,
-          })),
-        }),
+        body: JSON.stringify({ filePaths, disableModelInvocation }),
       });
-      const d = (await res.json()) as { success?: boolean; error?: string };
-      if (!res.ok || d.error) {
-        setSaveError(d.error ?? `HTTP ${res.status}`);
-        return;
+      const d = (await res.json()) as { results?: SkillToggleResult[]; error?: string };
+      if (!res.ok || d.error || !d.results) throw new Error(d.error ?? `HTTP ${res.status}`);
+      const results = d.results;
+      setSkills((prev) => applySkillToggleResults(prev, results, disableModelInvocation));
+      const failures = results.filter((result) => result.error);
+      if (failures.length > 0) {
+        const names = new Map(targets.map((skill) => [skill.filePath, skill.name]));
+        setGroupStatus({
+          group,
+          error: [
+            t("skills.bulkFailed", { count: failures.length, total: results.length }),
+            ...failures.map((failure) => `${names.get(failure.filePath) ?? failure.filePath}: ${failure.error}`),
+          ].join("\n"),
+        });
       }
-      const updatedPaths = new Set(needUpdate.map((s) => s.filePath));
-      setSkills((prev) =>
-        prev.map((s) => (updatedPaths.has(s.filePath) ? { ...s, disableModelInvocation: disable } : s)),
-      );
-      // Enabling a file-disabled skill renames SKILL.md.disabled -> SKILL.md, so the
-      // filePath changes; refresh the list to pick up the new paths.
-      if (needUpdate.some((s) => s.disabledByFile && !disable)) await loadSkills();
     } catch (e) {
-      setSaveError(String(e));
+      setGroupStatus({ group, error: e instanceof Error ? e.message : String(e) });
     } finally {
-      setBatchUpdating(false);
+      setBulkGroup(null);
+      setToggling((current) => {
+        const next = new Set(current);
+        for (const filePath of filePaths) next.delete(filePath);
+        return next;
+      });
     }
-  }, [loadSkills]);
+  }, [t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
+  const bulkBusy = loading || toggling.size > 0 || updatingSkill !== null;
 
   return (
     <ConfigPanelShell embedded={embedded} title={t("common.skills")} subtitle={shortenPath(cwd)} closeLabel={t("i18n.close")} onClose={onClose}>
-        {!projectResourcesLoaded && (
-          <div role="status" className="config-trust-notice">
-            {t("trust.skillsNotLoaded")}
-          </div>
-        )}
+
+        {!projectResourcesLoaded && <ConfigTrustNotice message={t("trust.skillsNotLoaded")} />}
 
         {/* Body */}
         <ConfigSplitView>
           {/* Left: skill list */}
           <ConfigSidebar>
-            {/* Top Toolbar: Search, Filters, and Batch Controls */}
-            <div
-              style={{
-                padding: "8px 8px 6px",
-                borderBottom: "1px solid var(--border)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-                background: "var(--bg-panel)",
-                flexShrink: 0,
-              }}
-            >
-              {/* Header Status & Count */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>
-                  {t("common.skills")}
-                </span>
-                <span
-                  style={{
-                    fontSize: 10.5,
-                    padding: "1px 6px",
-                    borderRadius: 8,
-                    background: enabledSkillsCount < totalSkillsCount ? "var(--bg-selected, rgba(59, 130, 246, 0.12))" : "var(--bg)",
-                    border: "1px solid var(--border)",
-                    color: enabledSkillsCount < totalSkillsCount ? "var(--accent)" : "var(--text-dim)",
-                    fontWeight: 600,
-                  }}
-                >
-                  {t("skills.enabledCount", { enabled: enabledSkillsCount, total: totalSkillsCount })}
-                </span>
-              </div>
-
-              {/* Search input */}
-              <div style={{ position: "relative", display: "flex", alignItems: "center", width: "100%" }}>
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{ position: "absolute", left: 7, color: "var(--text-dim)", pointerEvents: "none" }}
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                </svg>
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape" && searchQuery) {
-                      e.stopPropagation();
-                      setSearchQuery("");
-                    }
-                  }}
-                  placeholder={t("skills.searchPlaceholder") ?? "搜索技能…"}
-                  style={{
-                    width: "100%",
-                    height: 26,
-                    padding: "0 22px 0 24px",
-                    background: "var(--bg)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 5,
-                    fontSize: 11.5,
-                    color: "var(--text)",
-                    outline: "none",
-                  }}
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchQuery("")}
-                    style={{
-                      position: "absolute",
-                      right: 5,
-                      background: "none",
-                      border: "none",
-                      padding: 0,
-                      width: 16,
-                      height: 16,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: "var(--text-dim)",
-                      cursor: "pointer",
-                      fontSize: 12,
-                    }}
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-
-              {/* Filter Pills & Batch Action Toolbar */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4, flexWrap: "wrap" }}>
-                {/* Status Filter (全部 / 已启用 / 已禁用) */}
-                <div style={{ display: "flex", gap: 1, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 4, padding: 1 }}>
-                  {(["all", "enabled", "disabled"] as const).map((s) => {
-                    const active = statusFilter === s;
-                    const label = s === "all" ? (t("skills.filterAll") ?? "全部") : s === "enabled" ? (t("skills.filterEnabled") ?? "已启用") : (t("skills.filterDisabled") ?? "已禁用");
-                    return (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => setStatusFilter(s)}
-                        style={{
-                          padding: "1px 6px",
-                          fontSize: 10.5,
-                          background: active ? "var(--bg-selected, var(--bg-hover))" : "none",
-                          color: active ? "var(--text)" : "var(--text-muted)",
-                          fontWeight: active ? 600 : 400,
-                          border: "none",
-                          borderRadius: 3,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Batch Enable/Disable for visible list */}
-                <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
-                  <button
-                    type="button"
-                    disabled={batchUpdating || filteredSkills.length === 0}
-                    onClick={() => void batchToggle(filteredSkills, false)}
-                    title={t("skills.enableAll") ?? "全部启用"}
-                    style={{
-                      padding: "1px 5px",
-                      fontSize: 10.5,
-                      background: "none",
-                      border: "1px solid var(--border)",
-                      borderRadius: 4,
-                      color: "var(--accent)",
-                      cursor: batchUpdating || filteredSkills.length === 0 ? "default" : "pointer",
-                      opacity: batchUpdating || filteredSkills.length === 0 ? 0.5 : 1,
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-                  >
-                    {t("skills.enableAll") ?? "全部启用"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={batchUpdating || filteredSkills.length === 0}
-                    onClick={() => void batchToggle(filteredSkills, true)}
-                    title={t("skills.disableAll") ?? "全部禁用"}
-                    style={{
-                      padding: "1px 5px",
-                      fontSize: 10.5,
-                      background: "none",
-                      border: "1px solid var(--border)",
-                      borderRadius: 4,
-                      color: "var(--text-muted)",
-                      cursor: batchUpdating || filteredSkills.length === 0 ? "default" : "pointer",
-                      opacity: batchUpdating || filteredSkills.length === 0 ? 0.5 : 1,
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-                  >
-                    {t("skills.disableAll") ?? "全部禁用"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Active Filters Clear Row */}
-              {hasActiveFilters && (
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10.5 }}>
-                  <span style={{ color: "var(--text-dim)" }}>
-                    {filteredSkills.length} / {totalSkillsCount}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={clearFilters}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "var(--accent)",
-                      cursor: "pointer",
-                      padding: 0,
-                      fontSize: 10.5,
-                    }}
-                  >
-                    {t("skills.clearFilter") ?? "清空筛选"}
-                  </button>
-                </div>
-              )}
-
-              {/* Batch update loading banner */}
-              {batchUpdating && (
-                <div style={{ fontSize: 10.5, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
-                  <span>{t("skills.batchUpdating") ?? "正在批量更新…"}</span>
-                </div>
-              )}
-            </div>
-
             <ConfigSidebarList>
               {loading ? (
                 <div className="config-sidebar-message">
@@ -1033,30 +894,9 @@ export function SkillsConfig({
                 <div className="config-sidebar-message is-empty">
                    {t("i18n.noSkills")}
                 </div>
-              ) : filteredSkills.length === 0 ? (
-                <div className="config-sidebar-message is-empty" style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center", padding: "16px 8px" }}>
-                  <span>{t("skills.noMatches") ?? "未找到匹配的技能"}</span>
-                  {hasActiveFilters && (
-                    <button
-                      type="button"
-                      onClick={clearFilters}
-                      style={{
-                        background: "none",
-                        border: "1px solid var(--border)",
-                        borderRadius: 4,
-                        padding: "2px 8px",
-                        fontSize: 11,
-                        color: "var(--accent)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {t("skills.clearFilter") ?? "清空筛选"}
-                    </button>
-                  )}
-                </div>
               ) : (
                 (() => {
-                  const groups: { label: string; skills: typeof filteredSkills }[] = [];
+                  const groups: { label: string; skills: typeof skills }[] = [];
                   const scopeLabels = {
                     project: t("skills.scope.project"),
                     global: t("skills.scope.global"),
@@ -1093,7 +933,7 @@ export function SkillsConfig({
                     },
                   ];
                   for (const { label, matches } of groupDefinitions) {
-                    const grpSkills = filteredSkills.filter(matches);
+                    const grpSkills = skills.filter(matches);
                     if (grpSkills.length > 0)
                       groups.push({ label, skills: grpSkills });
                   }
@@ -1129,42 +969,25 @@ export function SkillsConfig({
                   };
                   return groups.map(
                     ({ label: grpLabel, skills: grpSkills }) => {
-                      const groupAllEnabled = grpSkills.every((s) => !s.disableModelInvocation);
+                      const visible = grpSkills.filter((skill) => !skill.disableModelInvocation).length;
+                      const allVisible = visible === grpSkills.length;
                       return (
                         <div key={grpLabel} className="config-sidebar-group">
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingRight: 4 }}>
-                            <ConfigSidebarGroupLabel>
-                              {grpLabel}
-                            </ConfigSidebarGroupLabel>
-                            <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
-                              <span style={{ fontSize: 10, color: "var(--text-dim)", marginRight: 2 }}>
-                                {grpSkills.filter((s) => !s.disableModelInvocation).length}/{grpSkills.length}
-                              </span>
-                              <button
-                                type="button"
-                                disabled={batchUpdating}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void batchToggle(grpSkills, groupAllEnabled);
-                                }}
-                                title={groupAllEnabled ? (t("skills.disableAll") ?? "禁用该组") : (t("skills.enableAll") ?? "启用该组")}
-                                style={{
-                                  background: "none",
-                                  border: "none",
-                                  padding: "1px 4px",
-                                  fontSize: 10,
-                                  color: groupAllEnabled ? "var(--text-muted)" : "var(--accent)",
-                                  cursor: batchUpdating ? "default" : "pointer",
-                                  borderRadius: 3,
-                                  opacity: batchUpdating ? 0.5 : 1,
-                                }}
-                                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-                              >
-                                {groupAllEnabled ? (t("skills.disableAll") ?? "禁用") : (t("skills.enableAll") ?? "启用")}
-                              </button>
-                            </div>
-                          </div>
+                          <ConfigSidebarGroupLabel
+                            aside={
+                              <ConfigSidebarGroupSwitch
+                                enabled={visible}
+                                total={grpSkills.length}
+                                disabled={bulkBusy}
+                                loading={bulkGroup === grpLabel}
+                                label={t(allVisible ? "skills.groupSwitchOn" : "skills.groupSwitchOff", { group: grpLabel })}
+                                onChange={(enabled) => void setGroupSkills(grpLabel, grpSkills, enabled)}
+                              />
+                            }
+                          >
+                            {grpLabel}
+                          </ConfigSidebarGroupLabel>
+                          {groupStatus?.group === grpLabel && <ConfigSidebarGroupStatus error={groupStatus.error} />}
                           {orderSkillsByDormancy(grpSkills).map(renderSkillRow)}
                         </div>
                       );

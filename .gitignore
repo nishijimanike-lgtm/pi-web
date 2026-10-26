@@ -24,17 +24,14 @@
 # misc
 .DS_Store
 *.pem
-*.lnk
+/.agents/
+/skills-lock.json
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-*.log
-.dsh-dev*
-.next.bak*
-/.next.bak*/
 
 # env files (can opt-in for committing if needed)
 .env*
@@ -59,6 +56,14 @@ e2e_*.mjs
 /bin/pi-web-tray.pdb
 native/tray/bin/
 native/tray/obj/
+*.lnk
 
+# desktop build target and local run output
 /runs
 src-tauri/target/
+
+# local dev logs and backups (restart-dev scripts)
+*.log
+.dsh-dev*
+.next.bak*
+/.next.bak*/
